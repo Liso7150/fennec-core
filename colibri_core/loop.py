@@ -126,13 +126,17 @@ def run_agent(sid: str, max_steps: int = 14):
                         if isinstance(value, int):
                             current["usage"][key] = current["usage"].get(key, 0) + value
             assistant = {"role": "assistant", "content": msg.get("content") or ""}
+            reasoning = msg.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                assistant["reasoning_content"] = reasoning
             tool_calls = msg.get("tool_calls") or []
             if tool_calls:
                 assistant["tool_calls"] = tool_calls
             messages.append(assistant)
             calls = [{"name": tc.get("function", {}).get("name"), "args": _args(tc)}
                      for tc in tool_calls]
-            _emit(sid, {"type": "assistant", "content": assistant["content"], "tool_calls": calls})
+            _emit(sid, {"type": "assistant", "content": assistant["content"],
+                        "reasoning": reasoning or "", "tool_calls": calls})
             if not tool_calls:
                 _emit(sid, {"type": "final", "content": assistant["content"]})
                 _finish(sid, "done")

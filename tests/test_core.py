@@ -26,11 +26,20 @@ class FakeEngine:
     def is_running(self):
         return self.running
 
-    def chat(self, messages, tools=None, tool_choice="auto", max_tokens=2048, temperature=0.2, timeout=600):
-        self.calls.append(list(messages))
+    def chat(self, messages, tools=None, tool_choice="auto", max_tokens=2048, temperature=0.2,
+             timeout=600, reasoning_effort=None, enable_thinking=None):
+        self.calls.append({"messages": list(messages), "reasoning_effort": reasoning_effort,
+                           "enable_thinking": enable_thinking})
         if self.gate is not None:
             self.gate.wait(5)
         return self.reply, {"total_tokens": 3}
+
+    def ensure_stt(self, wait_s=300):
+        return {"running": True, "model": "test", "device": "cpu"}
+
+    def transcribe(self, audio, content_type="audio/webm", timeout=180):
+        self.audio = audio
+        return {"text": "hello from audio", "language": "en", "duration_s": 1.0}
 
     def telemetry(self):
         return {"running": True, "backend": "vulkan"}
@@ -190,6 +199,42 @@ class ChatAndAgentTests(ClientCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"message": {"role": "assistant", "content": "done"},
                                            "usage": {"total_tokens": 3}})
+
+    def test_chat_passes_content_parts_reasoning_and_image(self):
+        image = "data:image/png;base64,iVBORw0KGgo="
+        response = self.client.post("/api/chat", headers=HEADERS, json={
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "what is this"},
+                {"type": "image_url", "image_url": {"url": image}}]}],
+            "reasoning_effort": "high", "enable_thinking": False})
+        self.assertEqual(response.status_code, 200)
+        sent = self.engine.calls[-1]
+        self.assertEqual(sent["messages"][0]["content"][1]["image_url"]["url"], image)
+        self.assertEqual(sent["reasoning_effort"], "high")
+        self.assertIs(sent["enable_thinking"], False)
+
+    def test_chat_rejects_more_than_one_image(self):
+        image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+        response = self.client.post("/api/chat", headers=HEADERS, json={
+            "messages": [{"role": "user", "content": [image, image]}]})
+        self.assertEqual(response.status_code, 422)
+
+    def test_chat_rejects_non_data_image_url(self):
+        response = self.client.post("/api/chat", headers=HEADERS, json={
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}}]}]})
+        self.assertEqual(response.status_code, 422)
+
+    def test_stt_returns_transcript(self):
+        response = self.client.post("/api/stt", headers={**HEADERS, "Content-Type": "audio/wav"},
+                                    content=b"RIFFfake-audio")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["text"], "hello from audio")
+        self.assertEqual(self.engine.audio, b"RIFFfake-audio")
+
+    def test_stt_rejects_empty_audio(self):
+        response = self.client.post("/api/stt", headers=HEADERS, content=b"")
+        self.assertEqual(response.status_code, 400)
 
     def test_chat_refuses_when_engine_down(self):
         self.engine.running = False

@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
@@ -39,10 +40,13 @@ class Engine:
         self.config = config
         self._process = None
         self._npu_process = None
+        self._stt_process = None
         self._lock = threading.Lock()
         self.log_path = config.cache_root / "colibri" / "engine.log"
         self.npu_log_path = config.cache_root / "colibri" / "npu.log"
+        self.stt_log_path = config.cache_root / "colibri" / "stt.log"
         self.npu_url = "http://127.0.0.1:8182"
+        self.stt_url = "http://127.0.0.1:8183"
 
     def _redact(self, text):
         for secret in (self.config.api_key, os.environ.get("COLIBRI_APP_TOKEN")):
@@ -182,6 +186,8 @@ class Engine:
         with self._lock:
             self._stop_owned(self._npu_process)
             self._npu_process = None
+            self._stop_owned(self._stt_process)
+            self._stt_process = None
 
     def _coli(self, args, timeout=120):
         command, options = self._command(args)
@@ -232,9 +238,13 @@ class Engine:
         return out
 
     def chat(self, messages, tools=None, tool_choice="auto", max_tokens=2048,
-             temperature=0.2, timeout=600):
+             temperature=0.2, timeout=600, reasoning_effort=None, enable_thinking=None):
         body = {"model": self.model_id(), "messages": messages, "max_tokens": max_tokens,
                 "temperature": temperature, "stream": False}
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
+        if enable_thinking is not None:
+            body["enable_thinking"] = bool(enable_thinking)
         if tools:
             body.update(tools=tools, tool_choice=tool_choice)
         try:
@@ -286,6 +296,79 @@ class Engine:
             texts = [texts]
         data = self._request("/v1/embeddings", {"input": texts}, timeout=timeout, npu=True)
         return [row["embedding"] for row in data.get("data", [])]
+
+    # ---- speech-to-text sidecar (faster-whisper, on demand) ----
+
+    def stt_health(self, timeout=1):
+        try:
+            return self._request_path(self.stt_url, "/health", timeout=timeout)
+        except EngineError:
+            return {"status": "down"}
+
+    def _request_path(self, base, path, body=None, timeout=4):
+        request = urllib.request.Request(base + path, headers={"Content-Type": "application/json"},
+                                         data=None if body is None else json.dumps(body).encode())
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                return json.loads(response.read(1_000_001))
+        except Exception as exc:
+            raise EngineError("Speech sidecar request failed") from exc
+
+    def ensure_stt(self, wait_s=300):
+        with self._lock:
+            health = self.stt_health()
+            if health.get("status") == "ok":
+                return {"running": True, "already": True, **health}
+            if self._stt_process is not None and self._stt_process.poll() is None:
+                process = self._stt_process
+            else:
+                script = Path(__file__).with_name("stt.py")
+                if not script.is_file():
+                    raise EngineError("Speech sidecar is not installed")
+                python, options = spawn_options(self.config.python)
+                self.stt_log_path.parent.mkdir(parents=True, exist_ok=True)
+                env = self._engine_env()  # carries HF_HOME so the model lands in cache_root
+                env.pop("COLI_API_KEY", None)
+                with self.stt_log_path.open("w", encoding="utf-8") as log:
+                    self._stt_process = subprocess.Popen(
+                        [python, str(script), "--port", "8183"],
+                        cwd=self.config.engine_root, env=env, stdin=subprocess.DEVNULL,
+                        stdout=log, stderr=log, **options)
+                process = self._stt_process
+        began = time.monotonic()
+        while time.monotonic() - began < wait_s:
+            health = self.stt_health()
+            if health.get("status") == "ok":
+                return {"running": True, "started": True, **health}
+            if process.poll() is not None:
+                break
+            time.sleep(0.5)
+        return {"running": False, "error": "Speech model did not become ready; inspect the sidecar log",
+                "log": str(self.stt_log_path)}
+
+    def transcribe(self, audio, content_type="audio/webm", timeout=180):
+        request = urllib.request.Request(
+            self.stt_url + "/transcribe", data=audio, method="POST",
+            headers={"Content-Type": content_type or "application/octet-stream"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                data = json.loads(response.read(1_000_001))
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = str(json.loads(exc.read(1_000_001)).get("error") or "")
+            except Exception:
+                detail = ""
+            message = f"Speech transcription failed: {detail}" if detail else \
+                "Speech transcription failed; check the sidecar log"
+            raise EngineError(message) from exc
+        except Exception as exc:
+            raise EngineError("Speech transcription failed; check the sidecar log") from exc
+        if not isinstance(data.get("text"), str):
+            raise EngineError("Speech sidecar returned no text")
+        return data
 
     def hardware(self):
         return hardware(self)

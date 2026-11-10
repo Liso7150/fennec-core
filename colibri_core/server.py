@@ -17,10 +17,10 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from . import loop
 from .config import Config, is_loopback, load_config
@@ -31,15 +31,64 @@ CLIENT_HEADER = "X-Colibri-Client"
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
+MAX_TEXT_PART = 200_000
+MAX_MESSAGE_BYTES = 12_000_000
+MAX_AUDIO_BYTES = 16 << 20
+
+
 class ChatMessage(BaseModel):
+    """OpenAI-style message: plain text, or content parts (text + one image)."""
     role: str = Field(pattern="^(system|user|assistant|tool)$")
-    content: str = Field(max_length=200_000)
+    content: str | list[dict]
 
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=200)
     max_tokens: int = Field(default=1024, ge=1, le=8192)
     temperature: float = Field(default=0.2, ge=0, le=2)
+    reasoning_effort: str | None = Field(
+        default=None, pattern="^(none|minimal|low|medium|high|xhigh)$")
+    enable_thinking: bool | None = None
+
+    @model_validator(mode="after")
+    def _check_content(self):
+        images = 0
+        total = 0
+        for index, message in enumerate(self.messages):
+            content = message.content
+            if isinstance(content, str):
+                if len(content) > MAX_TEXT_PART:
+                    raise ValueError(f"messages.{index}.content is too long")
+                total += len(content)
+                continue
+            if len(content) > 20:
+                raise ValueError(f"messages.{index}.content has too many parts")
+            for position, part in enumerate(content):
+                where = f"messages.{index}.content.{position}"
+                kind = part.get("type") if isinstance(part, dict) else None
+                if kind in ("text", "input_text"):
+                    text = part.get("text")
+                    if not isinstance(text, str):
+                        raise ValueError(f"{where}.text must be a string")
+                    if len(text) > MAX_TEXT_PART:
+                        raise ValueError(f"{where}.text is too long")
+                    total += len(text)
+                elif kind in ("image_url", "input_image"):
+                    url = part.get("image_url") if kind == "image_url" else part.get("url")
+                    if isinstance(url, dict):
+                        url = url.get("url")
+                    if (not isinstance(url, str) or not url.startswith("data:image/")
+                            or ";base64," not in url):
+                        raise ValueError(f"{where}: images must be base64 data: URLs")
+                    total += len(url)
+                    images += 1
+                else:
+                    raise ValueError(f"{where}: unsupported content part {kind!r}")
+        if images > 1:
+            raise ValueError("one image per request: the engine holds a single pending image")
+        if total > MAX_MESSAGE_BYTES:
+            raise ValueError("the request is too large")
+        return self
 
 
 class AgentRequest(BaseModel):
@@ -166,10 +215,31 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
         engine_or_503()
         try:
             message, usage = client.chat([m.model_dump() for m in req.messages],
-                                         max_tokens=req.max_tokens, temperature=req.temperature)
+                                         max_tokens=req.max_tokens, temperature=req.temperature,
+                                         reasoning_effort=req.reasoning_effort,
+                                         enable_thinking=req.enable_thinking)
         except EngineError as exc:
             raise HTTPException(503, str(exc)) from exc
         return {"message": message, "usage": usage}
+
+    @app.post("/api/stt")
+    async def stt(request: Request):
+        """Local speech-to-text: raw audio body -> {text}. The sidecar starts on demand."""
+        body = await request.body()
+        if not body:
+            raise HTTPException(400, "send raw audio bytes")
+        if len(body) > MAX_AUDIO_BYTES:
+            raise HTTPException(413, "audio must be at most 16 MiB")
+        try:
+            ready = client.ensure_stt()
+        except EngineError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        if not ready.get("running"):
+            raise HTTPException(503, ready.get("error") or "speech sidecar did not start")
+        try:
+            return client.transcribe(body, request.headers.get("content-type", "audio/webm"))
+        except EngineError as exc:
+            raise HTTPException(503, str(exc)) from exc
 
     @app.get("/api/engine")
     def engine_telemetry():
