@@ -1,3 +1,7 @@
-"""NCM Agent — a local coding agent powered by the Colibri engine,
-with the Next-Concept Modeling architecture as its namesake concept engine.
+"""Shared Colibri core: engine client, supervised agent loop, workspace tools.
+
+Inference runs on the Colibri engine (https://github.com/JustVugg/colibri);
+fine-tuning uses AirLLM (https://github.com/lyogavin/airllm).
 """
+
+__version__ = "1.0.0"

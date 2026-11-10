@@ -4,7 +4,10 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from itertools import islice
 
 MAX_READ = 24000
 MAX_RESULT = 7000
@@ -16,18 +19,76 @@ class ToolContext:
     session_dir: str = ""
     allow_shell: bool = False
     exec_timeout: int = 30
+    allow_write: bool = False
+    allow_npu: bool = False
+    engine_client: object = None
+    cache_root: str = ""
+
+
+_DENIED = {".git", ".ssh", ".aws", ".azure", ".kube", ".gnupg", ".docker",
+           ".npmrc", ".pypirc", ".netrc", "credentials", "credentials.json",
+           "authorized_keys", "known_hosts", "id_rsa", "id_ed25519", "id_dsa", "id_ecdsa"}
+
+
+def _credential(part):
+    name = part.casefold().rstrip(" .")
+    return (name in _DENIED or name == ".env" or name.startswith(".env.")
+            or re.search(r"(^|[._-])(tokens?|secrets?|credentials?)([._-]|$)", name)
+            or name.endswith((".pem", ".key", ".p12", ".pfx")))
 
 
 def _safe(ctx: ToolContext, rel: str) -> str:
-    rel = (rel or ".").strip()
-    if os.path.isabs(rel):
-        p = os.path.normpath(rel)
-    else:
-        p = os.path.normpath(os.path.join(ctx.workspace, rel))
-    root = os.path.normpath(ctx.workspace)
-    if p != root and not p.startswith(root + os.sep):
-        raise ValueError(f"path '{rel}' escapes the workspace jail ({root})")
-    return p
+    """Resolve symlinks/junctions before checking the boundary and credential names.
+
+    This is a filesystem guard, not an OS sandbox against concurrent hostile
+    filesystem mutation or explicitly permitted subprocesses.
+    """
+    if not isinstance(rel, str) or "\x00" in rel:
+        raise ValueError("invalid path")
+    root = os.path.realpath(ctx.workspace)
+    candidate = os.path.abspath(os.path.join(root, rel or "."))
+    resolved = os.path.realpath(candidate)
+    for path in (candidate, resolved):
+        try:
+            inside = os.path.commonpath([os.path.normcase(root), os.path.normcase(path)]) == os.path.normcase(root)
+        except ValueError:
+            inside = False
+        if not inside:
+            raise PermissionError("path escapes the configured workspace")
+        parts = Path(os.path.relpath(path, root)).parts
+        if any(_credential(part) or ":" in part or part.endswith((" ", ".")) and part != "." for part in parts):
+            raise PermissionError("credential or reserved path is not accessible")
+    return resolved
+
+
+def _walk_files(ctx, path=".", limit=2000):
+    root = _safe(ctx, path)
+    if os.path.isfile(root):
+        yield root
+        return
+    visited = 0
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        permitted = []
+        for name in dirs:
+            try:
+                child = _safe(ctx, os.path.join(directory, name))
+                if (name not in {"__pycache__", "node_modules", ".venv"}
+                        and not os.path.islink(os.path.join(directory, name))
+                        and not getattr(os.path, "isjunction", lambda p: False)(os.path.join(directory, name))):
+                    permitted.append(name)
+            except (OSError, ValueError, PermissionError):
+                continue
+        dirs[:] = permitted
+        for name in files:
+            visited += 1
+            if visited > limit:
+                return
+            try:
+                fp = _safe(ctx, os.path.join(directory, name))
+                if os.path.isfile(fp) and not fp.lower().endswith(SKIP_EXT) and os.path.getsize(fp) <= 400_000:
+                    yield fp
+            except (OSError, ValueError, PermissionError):
+                continue
 
 
 def _truncate(s: str, n: int = MAX_RESULT) -> str:
@@ -40,38 +101,60 @@ def list_dir(ctx, path="."):
     if not os.path.isdir(p):
         return {"ok": False, "error": f"not a directory: {path}"}
     entries = []
-    for name in sorted(os.listdir(p)):
-        full = os.path.join(p, name)
-        entries.append({"name": name + ("/" if os.path.isdir(full) else ""),
-                        "size": os.path.getsize(full) if os.path.isfile(full) else None})
+    with os.scandir(p) as children:
+        for entry in islice(children, 2000):
+            try:
+                full = _safe(ctx, entry.path)
+                entries.append({"name": entry.name + ("/" if os.path.isdir(full) else ""),
+                                "size": os.path.getsize(full) if os.path.isfile(full) else None})
+            except (OSError, ValueError, PermissionError):
+                continue
+            if len(entries) >= 500:
+                break
+    entries.sort(key=lambda entry: entry["name"])
     return {"ok": True, "path": os.path.relpath(p, ctx.workspace), "entries": entries}
 
 
-def read_file(ctx, path):
+def read_file(ctx, path, numbered=True):
     p = _safe(ctx, path)
     if not os.path.isfile(p):
         return {"ok": False, "error": f"not a file: {path}"}
     with open(p, encoding="utf-8", errors="replace") as f:
         text = f.read(MAX_READ + 1)
     lines = text.splitlines()
-    numbered = "\n".join(f"{i+1}\t{ln}" for i, ln in enumerate(lines[:600]))
-    return {"ok": True, "path": path, "lines": len(lines), "content": numbered}
+    if not numbered:
+        return {"ok": True, "path": path, "lines": len(lines), "content": _truncate(text, MAX_READ)}
+    numbered_text = "\n".join(f"{i+1}\t{ln}" for i, ln in enumerate(lines[:600]))
+    return {"ok": True, "path": path, "lines": len(lines), "content": numbered_text}
 
 
 def write_file(ctx, path, content):
+    if not ctx.allow_write:
+        raise PermissionError("writes require allow_write")
+    if not isinstance(content, str) or len(content) > 1_000_000:
+        raise ValueError("content must be text of at most 1000000 characters")
     p = _safe(ctx, path)
+    if os.path.exists(p) and not os.path.isfile(p):
+        raise ValueError("not a regular file")
     os.makedirs(os.path.dirname(p), exist_ok=True)
+    p = _safe(ctx, path)
     with open(p, "w", encoding="utf-8") as f:
         f.write(content)
     return {"ok": True, "path": path, "bytes": len(content.encode("utf-8"))}
 
 
 def edit_file(ctx, path, old, new):
+    if not ctx.allow_write:
+        raise PermissionError("edits require allow_write")
+    if not isinstance(old, str) or not old or not isinstance(new, str) or len(new) > 1_000_000:
+        raise ValueError("old must be nonempty text and new at most 1000000 characters")
     p = _safe(ctx, path)
     if not os.path.isfile(p):
         return {"ok": False, "error": f"not a file: {path}"}
     with open(p, encoding="utf-8") as f:
-        text = f.read()
+        text = f.read(1_000_001)
+    if len(text) > 1_000_000:
+        raise ValueError("file is too large to edit")
     count = text.count(old)
     if count == 0:
         return {"ok": False, "error": "old_string not found"}
@@ -89,14 +172,10 @@ def grep(ctx, pattern, path="."):
     except re.error as e:
         return {"ok": False, "error": f"bad regex: {e}"}
     hits = []
-    files = [root] if os.path.isfile(root) else [
-        os.path.join(dp, fn) for dp, dn, fns in os.walk(root)
-        for fn in fns if not fn.endswith((".pt", ".png", ".pyc", ".safetensors"))
-        and ".git" not in dp]
-    for fp in files[:2000]:
+    for fp in _walk_files(ctx, root):
         try:
-            with open(fp, encoding="utf-8", errors="ignore") as f:
-                for i, ln in enumerate(f, 1):
+            with open(_safe(ctx, fp), encoding="utf-8", errors="ignore") as f:
+                for i, ln in enumerate(f.read(MAX_READ).splitlines(), 1):
                     if rx.search(ln):
                         hits.append({"file": os.path.relpath(fp, ctx.workspace),
                                      "line": i, "text": ln.rstrip()[:200]})
@@ -109,41 +188,50 @@ def grep(ctx, pattern, path="."):
     return {"ok": True, "pattern": pattern, "count": len(hits), "hits": hits}
 
 
+def _run_process(ctx, command, *, shell=False):
+    if not ctx.allow_shell:
+        raise PermissionError("process execution requires allow_shell; it is NOT sandboxed")
+    env = {key: value for key, value in os.environ.items()
+           if key not in {"COLIBRI_API_KEY", "COLI_API_KEY", "COLIBRI_APP_TOKEN"}}
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        try:
+            process = subprocess.run(command, cwd=_safe(ctx, "."), shell=shell,
+                stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, env=env,
+                timeout=ctx.exec_timeout, **options)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": f"timeout after {ctx.exec_timeout}s; spawned descendants may still run"}
+        stdout.seek(0)
+        stderr.seek(0)
+        return {"ok": process.returncode == 0, "exit": process.returncode,
+                "stdout": _truncate(stdout.read(4001).decode("utf-8", "replace"), 4000),
+                "stderr": _truncate(stderr.read(2001).decode("utf-8", "replace"), 2000)}
+
+
 def run_python(ctx, code):
-    try:
-        p = subprocess.run([sys.executable, "-c", code], cwd=ctx.workspace,
-                           capture_output=True, text=True, timeout=ctx.exec_timeout)
-        return {"ok": p.returncode == 0, "exit": p.returncode,
-                "stdout": _truncate(p.stdout, 4000), "stderr": _truncate(p.stderr, 2000)}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"timeout after {ctx.exec_timeout}s"}
+    return _run_process(ctx, [sys.executable, "-c", code])
 
 
 def run_shell(ctx, command):
-    if not ctx.allow_shell:
-        return {"ok": False, "error": "shell disabled; enable 'allow shell' in the UI to run commands"}
-    try:
-        p = subprocess.run(command, cwd=ctx.workspace, shell=True, capture_output=True,
-                           text=True, timeout=ctx.exec_timeout)
-        return {"ok": p.returncode == 0, "exit": p.returncode,
-                "stdout": _truncate(p.stdout, 4000), "stderr": _truncate(p.stderr, 2000)}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"timeout after {ctx.exec_timeout}s"}
+    return _run_process(ctx, command, shell=True)
 
 
 def git_status(ctx):
-    p = subprocess.run(["git", "status", "--short"], cwd=ctx.workspace,
-                       capture_output=True, text=True, timeout=15)
-    return {"ok": p.returncode == 0, "status": p.stdout or "(clean)", "stderr": p.stderr[:500]}
+    result = _run_process(ctx, ["git", "--no-optional-locks", "status", "--short", "--", "."])
+    return {**result, "status": result.get("stdout", "")}
 
 
 def git_diff(ctx):
-    p = subprocess.run(["git", "diff"], cwd=ctx.workspace,
-                       capture_output=True, text=True, timeout=15)
-    return {"ok": p.returncode == 0, "diff": _truncate(p.stdout) or "(no diff)"}
+    # Literal safe files only; never allow git's external diff/textconv drivers.
+    if not ctx.allow_shell:
+        raise PermissionError("git execution requires allow_shell")
+    paths = [os.path.relpath(fp, ctx.workspace) for fp in _walk_files(ctx)]
+    if not paths:
+        return {"ok": True, "diff": "(no accessible files)"}
+    result = _run_process(ctx, ["git", "--literal-pathspecs", "--no-optional-locks", "diff",
+                               "--no-ext-diff", "--no-textconv", "--", *paths])
+    return {**result, "diff": result.get("stdout", "")}
 
-
-EMBED_CACHE = "D:/.cache/ncm-embed"
 SKIP_EXT = (".pt", ".png", ".jpg", ".jpeg", ".gif", ".pyc", ".safetensors",
             ".exe", ".dll", ".zip", ".hnmod", ".gguf", ".bin")
 
@@ -154,34 +242,25 @@ def semantic_search(ctx, query, k=8):
     import json
     import math
 
-    from . import engine
+    if not ctx.allow_npu:
+        raise PermissionError("semantic search requires explicitly enabled NPU support")
+    from .engine import get_engine
+    engine = ctx.engine_client or get_engine()
     root = _safe(ctx, ".")
-    os.makedirs(EMBED_CACHE, exist_ok=True)
+    cache_root = Path(ctx.cache_root or engine.config.cache_root) / "colibri-embed"
+    cache_root.mkdir(parents=True, exist_ok=True)
     ws_key = hashlib.sha1(os.path.abspath(root).encode()).hexdigest()[:12]
-    cache_path = os.path.join(EMBED_CACHE, ws_key + ".json")
+    cache_path = cache_root / (ws_key + ".json")
     try:
         with open(cache_path, encoding="utf-8") as f:
             cache = json.load(f)
     except (OSError, ValueError):
         cache = {}
 
-    files = []
-    for dp, dn, fns in os.walk(root):
-        dn[:] = [d for d in dn if d not in (".git", "__pycache__", "node_modules", ".venv")]
-        for fn in fns:
-            if fn.endswith(SKIP_EXT):
-                continue
-            fp = os.path.join(dp, fn)
-            try:
-                if os.path.getsize(fp) > 400_000:
-                    continue
-            except OSError:
-                continue
-            files.append(fp)
     chunks = []
-    for fp in files[:120]:
+    for fp in islice(_walk_files(ctx), 120):
         try:
-            with open(fp, encoding="utf-8", errors="ignore") as f:
+            with open(_safe(ctx, fp), encoding="utf-8", errors="ignore") as f:
                 lines = f.read(24000).splitlines()
         except OSError:
             continue
@@ -244,7 +323,7 @@ TOOLS = {
                         "Natural-language code search: embeds workspace chunks on the Intel NPU "
                         "and returns the closest file:line matches for a described intent.",
                         {"query": {"type": "string"}, "k": {"type": "integer"}}, ["query"]),
-    "run_python": (run_python, "Execute Python code in an isolated sandbox (30s timeout) and return stdout/stderr. Use to verify code.",
+    "run_python": (run_python, "Execute Python with host-user privileges (NOT sandboxed). Requires allow_shell; can write outside the workspace.",
                    {"code": {"type": "string"}}, ["code"]),
     "run_shell": (run_shell, "Run a shell command in the workspace (only if the user enabled 'allow shell').",
                   {"command": {"type": "string"}}, ["command"]),
@@ -253,21 +332,43 @@ TOOLS = {
 }
 
 
-def openai_tools():
+def _permitted(name, ctx):
+    if name in {"write_file", "edit_file"}:
+        return ctx.allow_write
+    if name in {"run_python", "run_shell", "git_status", "git_diff"}:
+        return ctx.allow_shell
+    if name == "semantic_search":
+        return ctx.allow_npu
+    return True
+
+
+def openai_tools(ctx=None):
+    ctx = ctx or ToolContext(workspace=".")
     out = []
     for name, (_, desc, props, required) in TOOLS.items():
-        out.append({"type": "function", "function": {
-            "name": name, "description": desc,
-            "parameters": {"type": "object", "properties": props, "required": required}}})
+        if _permitted(name, ctx):
+            out.append({"type": "function", "function": {
+                "name": name, "description": desc,
+                "parameters": {"type": "object", "properties": props,
+                               "required": required, "additionalProperties": False}}})
     return out
 
 
 def execute(name, args, ctx):
-    if name not in TOOLS:
-        return {"ok": False, "error": f"unknown tool '{name}'"}
+    if not isinstance(name, str) or name not in TOOLS:
+        return {"ok": False, "error": "unknown tool"}
+    if not _permitted(name, ctx):
+        return {"ok": False, "error": f"permission denied for {name}"}
+    if not isinstance(args, dict):
+        return {"ok": False, "error": "tool arguments must be an object"}
     handler = TOOLS[name][0]
     try:
-        return handler(ctx, **(args or {}))
+        result = handler(ctx, **args)
+        import json
+        if len(json.dumps(result)) > 32_000:
+            return {"ok": result.get("ok", False), "truncated": True,
+                    "content": _truncate(json.dumps(result), 30_000)}
+        return result
     except TypeError as e:
         return {"ok": False, "error": f"bad arguments: {e}"}
     except Exception as e:

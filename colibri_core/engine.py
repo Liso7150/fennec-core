@@ -1,273 +1,352 @@
+"""Lightweight engine client/supervisor. Importing never loads models or starts services."""
 from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+import platform
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
-import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
-COLIBRI_ROOT = "D:/Colibri"
-PY = os.path.join(COLIBRI_ROOT, ".venv", "Scripts", "python.exe")
-COLI = os.path.join(COLIBRI_ROOT, "c", "coli")
-MODEL_DIR = "D:/colibri-models/qwen3-coder-30b-colibri"
-PORT = int(os.environ.get("NCM_COLIBRI_PORT", "8181"))
-BASE = f"http://127.0.0.1:{PORT}"
-SERVE_LOG = "D:/NCMUI/_colibri_engine.log"
-API_KEY = os.environ.get("COLI_API_KEY", "")
-
-NPU_PORT = int(os.environ.get("NCM_NPU_PORT", "8182"))
-NPU_BASE = f"http://127.0.0.1:{NPU_PORT}"
-NPU_LOG = "D:/NCMUI/_npu_embed.log"
-NPU_SERVER = os.path.join(COLIBRI_ROOT, "scripts", "npu_embed_server.py")
+from .config import Config, is_loopback, load_config
 
 
-def _headers():
-    return {"Authorization": f"Bearer {API_KEY}"} if API_KEY else {}
+class EngineError(RuntimeError):
+    pass
 
 
-def _get(path, timeout=4, base=None):
-    req = urllib.request.Request((base or BASE) + path, headers=_headers())
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode())
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # Never forward credentials to another origin.
 
 
-def _post(path, body, timeout=600, base=None):
-    h = {"Content-Type": "application/json", **_headers()}
-    req = urllib.request.Request(
-        (base or BASE) + path, data=json.dumps(body).encode(), headers=h)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode())
-
-
-def _engine_env():
-    return dict(os.environ, COLI_VULKAN="1", COLI_VK_DEV2="auto",
-                HF_HOME="D:/.cache/huggingface")
-
-
-def is_running() -> bool:
-    try:
-        _get("/health", timeout=2)
-        return True
-    except Exception:
-        return False
-
-
-_model_id = None
-
-
-def model_id() -> str:
-    global _model_id
-    if _model_id:
-        return _model_id
-    try:
-        d = _get("/v1/models")
-        _model_id = d["data"][0]["id"]
-    except Exception:
-        _model_id = "qwen3-coder-30b-a3b-colibri"
-    return _model_id
-
-
-def _coli(args, timeout=120):
-    env = _engine_env()
-    p = subprocess.run([PY, COLI] + args, cwd=COLIBRI_ROOT, env=env,
-                       capture_output=True, text=True, timeout=timeout)
-    return {"exit": p.returncode, "out": (p.stdout + p.stderr)[-8000:]}
-
-
-def start(wait_s=180) -> dict:
-    if is_running():
-        return {"running": True, "already": True, "model": model_id()}
-    env = _engine_env()
-    flags = 0
+def spawn_options(python):
     if os.name == "nt":
-        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    with open(SERVE_LOG, "w", encoding="utf-8") as log:
-        subprocess.Popen(
-            [PY, COLI, "serve", "--auto-tier", "--model", MODEL_DIR,
-             "--port", str(PORT), "--ngen", "4096"],
-            cwd=COLIBRI_ROOT, env=env, stdout=log, stderr=log, creationflags=flags)
-    t0 = time.time()
-    while time.time() - t0 < wait_s:
-        if is_running():
-            return {"running": True, "started": True, "model": model_id(),
-                    "warmup_s": round(time.time() - t0, 1)}
-        time.sleep(2)
-    return {"running": False, "error": "engine did not become healthy in time",
-            "log": SERVE_LOG}
+        windowless = Path(python).with_name("pythonw.exe")
+        if windowless.is_file():
+            python = str(windowless)
+        return python, {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return python, {"start_new_session": True}
 
 
-def stop() -> dict:
-    return _coli(["stop", "--port", str(PORT)], timeout=90)
+class Engine:
+    def __init__(self, config: Config):
+        self.config = config
+        self._process = None
+        self._npu_process = None
+        self._lock = threading.Lock()
+        self.log_path = config.cache_root / "colibri" / "engine.log"
+        self.npu_log_path = config.cache_root / "colibri" / "npu.log"
+        self.npu_url = "http://127.0.0.1:8182"
 
+    def _redact(self, text):
+        for secret in (self.config.api_key, os.environ.get("COLIBRI_APP_TOKEN")):
+            if secret:
+                text = text.replace(secret, "[redacted]")
+        return text
 
-def telemetry() -> dict:
-    """Live Colibri feature surface for the dashboard."""
-    out = {"running": is_running(), "port": PORT, "model_dir": MODEL_DIR}
-    if not out["running"]:
-        return out
-    out["model"] = model_id()
-    for key, path in (("health", "/health"), ("metrics", "/metrics"),
-                      ("experts", "/experts"), ("profile", "/profile")):
+    def _request(self, path, body=None, timeout=4, *, npu=False):
+        base = self.npu_url if npu else self.config.engine_url
+        headers = {"Content-Type": "application/json"}
+        if not npu and self.config.api_key:
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        request = urllib.request.Request(base + path, headers=headers,
+                                         data=None if body is None else json.dumps(body).encode())
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
         try:
-            out[key] = _get(path, timeout=5)
-        except Exception as e:
-            out[key] = {"error": repr(e)}
-    return out
+            with opener.open(request, timeout=timeout) as response:
+                payload = response.read(2_000_001)
+                if len(payload) > 2_000_000:
+                    raise EngineError("Engine response exceeded the size limit")
+                return json.loads(payload)
+        except EngineError:
+            raise
+        except Exception as exc:
+            raise EngineError("Engine request failed; check engine health and configuration") from exc
+
+    def is_running(self):
+        try:
+            self._request("/health", timeout=2)
+            return True
+        except EngineError:
+            return False
+
+    def model_id(self):
+        # An attached server can switch models; do not retain a stale ID.
+        try:
+            return self._request("/v1/models")["data"][0]["id"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise EngineError("Engine did not advertise a model") from exc
+
+    def _engine_env(self):
+        env = dict(os.environ)
+        for key in ("COLIBRI_APP_TOKEN", "COLIBRI_API_KEY", "COLI_API_KEY",
+                    "COLI_VULKAN", "COLI_METAL", "COLI_CUDA", "COLI_VK_DEV2"):
+            env.pop(key, None)
+        env.update(HF_HOME=str(self.config.cache_root / "huggingface"),
+                   COLI_MODEL=self.config.model, COLI_API_KEY=self.config.api_key)
+        # serve has no --backend flag; auto delegates detection to coli.
+        if self.config.backend != "auto":
+            env.update(COLI_VULKAN="0", COLI_METAL="0", COLI_CUDA="0")
+            if self.config.backend != "cpu":
+                env["COLI_" + self.config.backend.upper()] = "1"
+        return env
+
+    def _command(self, args):
+        launcher = self.config.engine_root / "c" / "coli"
+        if not launcher.is_file():
+            raise EngineError("Colibri launcher missing; configure engine_root with an existing installation")
+        python, options = spawn_options(self.config.python)
+        return [python, str(launcher), *args], options
+
+    def _model_args(self):
+        if not self.config.model or not Path(self.config.model).is_dir():
+            raise EngineError("Choose an installed model with COLIBRI_MODEL or the model configuration key")
+        return ["--model", self.config.model, "--policy", self.config.policy, "--ctx", str(self.config.ctx)]
+
+    def _owns_engine(self):
+        return self._process is not None and self._process.poll() is None
+
+    def start(self, wait_s=180):
+        with self._lock:
+            if self.is_running():
+                return {"running": True, "already": True, "owned": self._owns_engine()}
+            if self._owns_engine():
+                return {"running": False, "starting": True, "owned": True}
+            url = urlsplit(self.config.engine_url)
+            if not is_loopback(url.hostname) or url.scheme != "http":
+                raise EngineError("Only a local HTTP engine can be spawned; remote/TLS engines are attach-only")
+            command, options = self._command([
+                "serve", "--auto-tier", *self._model_args(), "--host", url.hostname,
+                "--port", str(url.port or 80), "--ngen", "4096"])
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("w", encoding="utf-8") as log:
+                self._process = subprocess.Popen(command, cwd=self.config.engine_root,
+                    env=self._engine_env(), stdin=subprocess.DEVNULL, stdout=log, stderr=log, **options)
+            process = self._process
+        began = time.monotonic()
+        while time.monotonic() - began < wait_s:
+            if process.poll() is not None:
+                return {"running": False, "error": "Engine exited during startup", "log": str(self.log_path)}
+            if self.is_running():
+                return {"running": True, "started": True, "owned": True,
+                        "warmup_s": round(time.monotonic() - began, 1)}
+            time.sleep(0.25)
+        return {"running": False, "error": "Engine startup timed out; inspect logs or stop the owned process",
+                "log": str(self.log_path), "owned": self._owns_engine()}
+
+    @staticmethod
+    def _stop_owned(process):
+        if process is None or process.poll() is not None:
+            return False
+        import psutil
+        # Only descendants of the live Popen we own; never discover a process by port/name.
+        try:
+            children = psutil.Process(process.pid).children(recursive=True)
+        except psutil.NoSuchProcess:
+            children = []
+        for child in reversed(children):
+            try:
+                child.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        _, alive = psutil.wait_procs(children, timeout=3)
+        for child in alive:
+            try:
+                child.kill()  # psutil guards against PID reuse.
+            except psutil.NoSuchProcess:
+                pass
+        return True
+
+    def stop(self):
+        with self._lock:
+            if not self._owns_engine():
+                return {"stopped": False, "owned": False, "reason": "No owned engine; attached servers are never stopped"}
+            stopped = self._stop_owned(self._process)
+            self._process = None
+            return {"stopped": stopped, "owned": True}
+
+    def close(self):
+        self.stop()
+        with self._lock:
+            self._stop_owned(self._npu_process)
+            self._npu_process = None
+
+    def _coli(self, args, timeout=120):
+        command, options = self._command(args)
+        with tempfile.TemporaryFile() as output:
+            try:
+                result = subprocess.run(command, cwd=self.config.engine_root, env=self._engine_env(),
+                    stdin=subprocess.DEVNULL, stdout=output, stderr=output, timeout=timeout, **options)
+            except subprocess.TimeoutExpired as exc:
+                raise EngineError("Colibri diagnostic timed out") from exc
+            output.seek(0, 2)
+            output.seek(max(0, output.tell() - 8000))
+            return {"exit": result.returncode, "out": self._redact(output.read().decode("utf-8", "replace"))}
+
+    def plan(self):
+        return self._coli(["plan", *self._model_args()])
+
+    def doctor(self):
+        return self._coli(["doctor"] + (self._model_args() if self.config.model else []))
+
+    def status(self):
+        return {"running": self.is_running(), "owned": self._owns_engine(), "engine_url": self.config.engine_url}
+
+    def logs(self, n=60):
+        try:
+            with self.log_path.open("rb") as stream:
+                stream.seek(0, 2)
+                stream.seek(max(0, stream.tell() - 32_000))
+                lines = self._redact(stream.read().decode("utf-8", "replace")).splitlines(True)
+            return {"lines": lines[-max(1, min(n, 200)):], "path": str(self.log_path)}
+        except OSError:
+            return {"lines": [], "path": str(self.log_path)}
+
+    def telemetry(self):
+        url = urlsplit(self.config.engine_url)
+        out = {"running": self.is_running(), "owned": self._owns_engine(),
+               "port": url.port or (443 if url.scheme == "https" else 80),
+               "model_dir": self.config.model, "backend": self.config.backend}
+        if out["running"]:
+            try:
+                out["model"] = self.model_id()
+            except EngineError:
+                out["model"] = None
+            for key in ("health", "metrics", "experts", "profile"):
+                try:
+                    out[key] = self._request("/" + key, timeout=5)
+                except EngineError:
+                    out[key] = {"error": "unavailable"}
+        return out
+
+    def chat(self, messages, tools=None, tool_choice="auto", max_tokens=2048,
+             temperature=0.2, timeout=600):
+        body = {"model": self.model_id(), "messages": messages, "max_tokens": max_tokens,
+                "temperature": temperature, "stream": False}
+        if tools:
+            body.update(tools=tools, tool_choice=tool_choice)
+        try:
+            data = self._request("/v1/chat/completions", body, timeout=timeout)
+            return data["choices"][0]["message"], data.get("usage", {})
+        except (KeyError, IndexError, TypeError) as exc:
+            raise EngineError("Invalid chat response from engine") from exc
+
+    def npu_health(self, timeout=2):
+        try:
+            return self._request("/health", timeout=timeout, npu=True)
+        except EngineError:
+            return {"status": "down"}
+
+    def ensure_npu(self, wait_s=60, *, enabled=False):
+        if not enabled:
+            return {"running": False, "error": "NPU startup requires explicit enablement"}
+        with self._lock:
+            health = self.npu_health()
+            if health.get("status") == "ok":
+                return {"running": True, "already": True, **health}
+            if self._npu_process is not None and self._npu_process.poll() is None:
+                return {"starting": True}
+            script = self.config.engine_root / "scripts" / "npu_embed_server.py"
+            if not script.is_file():
+                raise EngineError("Optional NPU sidecar is not installed")
+            python, options = spawn_options(self.config.python)
+            self.npu_log_path.parent.mkdir(parents=True, exist_ok=True)
+            env = self._engine_env()
+            env.pop("COLI_API_KEY", None)
+            with self.npu_log_path.open("w", encoding="utf-8") as log:
+                self._npu_process = subprocess.Popen(
+                    [python, str(script), "--port", "8182", "--device", "NPU"],
+                    cwd=self.config.engine_root, env=env, stdin=subprocess.DEVNULL,
+                    stdout=log, stderr=log, **options)
+            process = self._npu_process
+        began = time.monotonic()
+        while time.monotonic() - began < wait_s:
+            health = self.npu_health()
+            if health.get("status") == "ok":
+                return {"running": True, "started": True, **health}
+            if process.poll() is not None:
+                break
+            time.sleep(0.25)
+        return {"running": False, "error": "NPU sidecar did not become healthy"}
+
+    def embed(self, texts, timeout=120):
+        if isinstance(texts, str):
+            texts = [texts]
+        data = self._request("/v1/embeddings", {"input": texts}, timeout=timeout, npu=True)
+        return [row["embedding"] for row in data.get("data", [])]
+
+    def hardware(self):
+        return hardware(self)
 
 
-def plan() -> dict:
-    return _coli(["plan", "--model", MODEL_DIR], timeout=120)
+_default = None
+_default_lock = threading.Lock()
 
 
-def doctor() -> dict:
-    return _coli(["doctor"], timeout=120)
+def get_engine():
+    global _default
+    with _default_lock:
+        if _default is None:
+            _default = Engine(load_config())
+        return _default
 
 
-def status() -> dict:
-    return _coli(["status"], timeout=60)
+def __getattr__(name):
+    if name in {"is_running", "model_id", "start", "stop", "telemetry", "plan", "doctor",
+                "status", "logs", "chat", "npu_health", "ensure_npu", "embed"}:
+        return getattr(get_engine(), name)
+    raise AttributeError(name)
 
 
-def logs(n=60) -> dict:
-    try:
-        with open(SERVE_LOG, encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        return {"lines": lines[-n:], "path": SERVE_LOG}
-    except OSError as e:
-        return {"error": repr(e)}
-
-
-def chat(messages, tools=None, tool_choice="auto", max_tokens=2048,
-         temperature=0.2, timeout=600):
-    body = {"model": model_id(), "messages": messages, "max_tokens": max_tokens,
-            "temperature": temperature, "stream": False}
-    if tools:
-        body["tools"] = tools
-        body["tool_choice"] = tool_choice
-    d = _post("/v1/chat/completions", body, timeout=timeout)
-    return d["choices"][0]["message"], d.get("usage", {})
-
-
-# ---- Intel NPU (OpenVINO embedding service) ------------------------------
-def npu_health(timeout=2):
-    try:
-        return _get("/health", timeout=timeout, base=NPU_BASE)
-    except Exception as e:
-        return {"status": "down", "error": repr(e)}
-
-
-def ensure_npu(wait_s=60) -> dict:
-    h = npu_health()
-    if h.get("status") == "ok":
-        return {"running": True, "already": True, **h}
-    flags = 0
-    if os.name == "nt":
-        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    with open(NPU_LOG, "w", encoding="utf-8") as log:
-        subprocess.Popen(
-            [PY, NPU_SERVER, "--port", str(NPU_PORT), "--device", "NPU"],
-            cwd=COLIBRI_ROOT, env=dict(os.environ, HF_HOME="D:/.cache/huggingface"),
-            stdout=log, stderr=log, creationflags=flags)
-    t0 = time.time()
-    while time.time() - t0 < wait_s:
-        h = npu_health()
-        if h.get("status") == "ok":
-            return {"running": True, "started": True,
-                    "warmup_s": round(time.time() - t0, 1), **h}
-        time.sleep(1)
-    return {"running": False, "error": "NPU embedding service did not start",
-            "log": NPU_LOG}
-
-
-def embed(texts, timeout=120):
-    if isinstance(texts, str):
-        texts = [texts]
-    d = _post("/v1/embeddings", {"input": texts}, timeout=timeout, base=NPU_BASE)
-    return [row["embedding"] for row in d.get("data", [])]
-
-
-# ---- hardware snapshot ---------------------------------------------------
 def _run(cmd, timeout=10):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return (p.stdout or "").strip()
-    except Exception:
+        options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **options)
+        return (p.stdout or "")[:16_000].strip()
+    except (OSError, subprocess.SubprocessError):
         return ""
 
 
-_VIDEO_NAMES = None
-
-
-def _video_names():
-    global _VIDEO_NAMES
-    if _VIDEO_NAMES is None:
-        out = _run(["powershell", "-NoProfile", "-Command",
-                    "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }"])
-        _VIDEO_NAMES = [ln.strip() for ln in out.splitlines() if ln.strip()]
-    return _VIDEO_NAMES
-
-
-def hardware() -> dict:
+def hardware(client=None):
     import psutil
+    client = client or get_engine()
     vm = psutil.virtual_memory()
-    du = shutil.disk_usage("D:/")
-    out = {
-        "ram": {"total_gb": round(vm.total / 2**30, 1),
-                "used_gb": round(vm.used / 2**30, 1),
-                "available_gb": round(vm.available / 2**30, 1)},
-        "disk_d": {"total_gb": round(du.total / 2**30, 1),
-                   "free_gb": round(du.free / 2**30, 1)},
-        "npu": npu_health(),
-        "engine_running": is_running(),
-    }
+    disk_path = client.config.workspace
+    while not disk_path.exists() and disk_path != disk_path.parent:
+        disk_path = disk_path.parent
+    disk = shutil.disk_usage(disk_path)
+    out = {"platform": platform.system(), "cpu": {"name": platform.processor(), "cores": psutil.cpu_count()},
+           "ram": {"total_gb": round(vm.total / 2**30, 1), "used_gb": round(vm.used / 2**30, 1),
+                   "available_gb": round(vm.available / 2**30, 1)},
+           "disk": {"path": str(disk_path), "total_gb": round(disk.total / 2**30, 1),
+                    "free_gb": round(disk.free / 2**30, 1)},
+           "npu": client.npu_health(), "engine_running": client.is_running(), "gpu": []}
     smi = _run(["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu",
                 "--format=csv,noheader,nounits"])
-    gpus = []
-    for ln in smi.splitlines():
-        parts = [x.strip() for x in ln.split(",")]
-        if len(parts) == 4 and parts[1].isdigit():
-            gpus.append({"name": parts[0], "mem_used_mb": int(parts[1]),
-                         "mem_total_mb": int(parts[2]), "util_pct": int(parts[3])})
-    out["gpu"] = gpus
-    ps = ("$n=@{}; Get-CimInstance Win32_VideoController | ForEach-Object { "
-          "if ($_.AdapterLuid) { $n[$_.AdapterLuid.ToLower()] = $_.Name } }; "
-          "Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory "
-          "| ForEach-Object { $l = ($_.Name -replace '^luid_','' -replace '_phys_0$','').ToLower(); "
-          "\"{0}|{1}|{2}|{3}\" -f $_.Name,$n[$l],$_.DedicatedUsage,$_.SharedUsage }")
-    adapters, tot_ded, tot_shared = [], 0, 0
-    names = _video_names()
-    intel = next((n for n in names if "Intel" in n), "")
-    for ln in _run(["powershell", "-NoProfile", "-Command", ps], timeout=25).splitlines():
-        parts = ln.split("|")
-        if len(parts) != 4 or not parts[2].isdigit() or not parts[3].isdigit():
-            continue
-        ded, shared = int(parts[2]) / 2**20, int(parts[3]) / 2**20
-        if ded < 1 and shared < 1:
-            continue
-        label = parts[1] or parts[0]
-        if label.startswith("luid_"):
-            label = "shared-memory adapter" if ded < 50 else "GPU"
-        adapters.append({"name": label, "luid": parts[0], "dedicated_mb": round(ded),
-                         "shared_mb": round(shared)})
-        tot_ded += ded
-        tot_shared += shared
-    if adapters:
-        top = max(adapters, key=lambda a: a["dedicated_mb"])
-        if gpus and top["dedicated_mb"] > 100:
-            top["name"] = gpus[0]["name"]
-        others = [a for a in adapters if a is not top and a["dedicated_mb"] < 50]
-        if intel and others:
-            big = max(others, key=lambda a: a["shared_mb"])
-            if big["shared_mb"] > 200:
-                big["name"] = f"{intel} (shared RAM)"
-    out["gpu_adapters"] = adapters
-    out["gpu_total"] = {"dedicated_mb": round(tot_ded), "shared_mb": round(tot_shared)}
-    try:
-        with open(SERVE_LOG, encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()[-400:]
-        out["tier"] = [ln.strip() for ln in lines
-                       if "[VK] tier" in ln and ("second device" in ln or " on," in ln)][-3:]
-    except OSError:
-        out["tier"] = []
+    for line in smi.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) == 4:
+            try:
+                out["gpu"].append({"name": parts[0], "mem_used_mb": int(parts[1]),
+                                   "mem_total_mb": int(parts[2]), "util_pct": int(parts[3])})
+            except ValueError:
+                continue
+    out["gpu_adapters"] = list(out["gpu"])
+    if os.name == "nt":
+        names = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                      "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }"])
+        out["gpu_adapters"] = [{"name": name.strip()} for name in names.splitlines() if name.strip()]
+    out["tier"] = [line.strip() for line in client.logs(200)["lines"] if "[VK] tier" in line][-3:]
     return out

@@ -8,95 +8,149 @@ import uuid
 from . import engine
 from .tools import ToolContext, execute, openai_tools
 
-SYSTEM = """You are NCM Coder, a local coding agent running on the Colibri inference engine \
-(Qwen3-Coder-30B) inside the Next-Concept Modeling desktop app. You solve coding tasks in the \
-user's workspace by calling tools.
+SYSTEM = """You are Colibri Coder, a local coding agent running on the Colibri inference engine \
+(a device-tiered MoE decoder). You solve coding tasks in the user's workspace by calling tools.
 
 Workflow:
 1. Inspect first: list_dir, read_file, grep — never guess a file's contents.
 2. Plan briefly, then implement with write_file / edit_file (small, correct changes).
-3. VERIFY your work by running code with run_python (isolated sandbox). Fix failures.
+3. Verify your work by running code with run_python when process execution is enabled. Fix failures.
 4. When done, reply with a concise summary and NO tool call.
 
 Rules: All paths are relative to the workspace. Prefer editing over rewriting. Keep answers tight. \
-Use tools rather than asking the user for information you can read yourself. Do not call run_shell \
-unless it is enabled."""
+Use tools rather than asking the user for information you can read yourself. run_python and run_shell \
+are NOT sandboxed: they run with the server user's privileges and are only offered when the user \
+enabled process execution for this task."""
 
+MAX_STEPS = 40
+MAX_SESSIONS = 50
 SESSIONS: dict = {}
 _LOCK = threading.Lock()
 
 
-def new_session(task: str, workspace: str, allow_shell: bool = False) -> str:
+def new_session(task: str, workspace: str, *, allow_write: bool = False,
+                allow_shell: bool = False, allow_npu: bool = False,
+                engine_client=None) -> str:
     sid = uuid.uuid4().hex[:12]
-    session_dir = ""
-    ctx = ToolContext(workspace=workspace, session_dir=session_dir, allow_shell=allow_shell)
+    ctx = ToolContext(workspace=workspace, allow_write=allow_write, allow_shell=allow_shell,
+                      allow_npu=allow_npu, engine_client=engine_client)
     with _LOCK:
+        _evict()
         SESSIONS[sid] = {"id": sid, "task": task, "steps": [], "status": "running",
-                         "ctx": ctx, "created": time.time(), "usage": {}}
+                         "ctx": ctx, "created": time.time(), "usage": {},
+                         "cancel": threading.Event()}
     return sid
+
+
+def _evict():
+    if len(SESSIONS) < MAX_SESSIONS:
+        return
+    finished = [(session["created"], sid) for sid, session in SESSIONS.items()
+                if session["status"] != "running"]
+    for _, sid in sorted(finished)[:max(1, len(SESSIONS) - MAX_SESSIONS + 1)]:
+        SESSIONS.pop(sid, None)
 
 
 def _emit(sid, event):
     with _LOCK:
-        s = SESSIONS.get(sid)
-        if s is not None:
-            event["i"] = len(s["steps"])
-            event["t"] = round(time.time() - s["created"], 2)
-            s["steps"].append(event)
+        session = SESSIONS.get(sid)
+        if session is None or len(session["steps"]) >= 1000:
+            return
+        event["i"] = len(session["steps"])
+        event["t"] = round(time.time() - session["created"], 2)
+        session["steps"].append(event)
 
 
 def get_steps(sid, after=0):
     with _LOCK:
-        s = SESSIONS.get(sid)
-        if not s:
+        session = SESSIONS.get(sid)
+        if not session:
             return None
-        return {"id": sid, "status": s["status"], "task": s["task"],
-                "steps": s["steps"][after:], "total": len(s["steps"]),
-                "usage": s["usage"]}
+        return {"id": sid, "status": session["status"], "task": session["task"],
+                "steps": session["steps"][max(0, after):], "total": len(session["steps"]),
+                "usage": session["usage"]}
+
+
+def cancel(sid) -> bool:
+    """Mark the run cancelled immediately; the worker stops at its next checkpoint."""
+    with _LOCK:
+        session = SESSIONS.get(sid)
+        if session is None:
+            return False
+        if session["status"] == "running":
+            session["status"] = "cancelled"
+            session["cancel"].set()
+            session["steps"].append({"type": "cancelled", "content": "Cancelled by the user.",
+                                     "i": len(session["steps"]),
+                                     "t": round(time.time() - session["created"], 2)})
+            return True
+        return session["status"] == "cancelled"
+
+
+def _finish(sid, status):
+    with _LOCK:
+        session = SESSIONS.get(sid)
+        if session is not None and session["status"] == "running":
+            session["status"] = status
+
+
+def _cancelled(sid):
+    with _LOCK:
+        session = SESSIONS.get(sid)
+        return session is None or session["cancel"].is_set()
 
 
 def run_agent(sid: str, max_steps: int = 14):
-    s = SESSIONS[sid]
-    ctx = s["ctx"]
-    system = SYSTEM + f"\n\nWorkspace: {ctx.workspace}"
-    messages = [{"role": "system", "content": system},
-                {"role": "user", "content": s["task"]}]
-    _emit(sid, {"type": "user", "content": s["task"]})
-    tools = openai_tools()
+    with _LOCK:
+        session = SESSIONS.get(sid)
+    if session is None:
+        return
+    ctx = session["ctx"]
+    client = ctx.engine_client or engine
+    messages = [{"role": "system", "content": SYSTEM + f"\n\nWorkspace: {ctx.workspace}"},
+                {"role": "user", "content": session["task"]}]
+    tools = openai_tools(ctx)
     try:
-        for _ in range(max_steps):
-            msg, usage = engine.chat(messages, tools=tools)
-            with _LOCK:
-                for k, v in (usage or {}).items():
-                    if isinstance(v, int):
-                        s["usage"][k] = s["usage"].get(k, 0) + v
-            assistant = {"role": "assistant", "content": msg.get("content") or ""}
-            tcs = msg.get("tool_calls") or []
-            if tcs:
-                assistant["tool_calls"] = tcs
-            messages.append(assistant)
-            calls = [{"name": tc.get("function", {}).get("name"),
-                      "args": _args(tc)} for tc in tcs]
-            _emit(sid, {"type": "assistant", "content": assistant["content"], "tool_calls": calls})
-            if not tcs:
-                _emit(sid, {"type": "final", "content": assistant["content"]})
-                with _LOCK:
-                    s["status"] = "done"
+        for _ in range(max(1, min(max_steps, MAX_STEPS))):
+            if _cancelled(sid):
+                _finish(sid, "cancelled")
                 return
-            for tc, call in zip(tcs, calls):
+            msg, usage = client.chat(messages, tools=tools)
+            if _cancelled(sid):
+                _finish(sid, "cancelled")
+                return
+            with _LOCK:
+                current = SESSIONS.get(sid)
+                if current is not None:
+                    for key, value in (usage or {}).items():
+                        if isinstance(value, int):
+                            current["usage"][key] = current["usage"].get(key, 0) + value
+            assistant = {"role": "assistant", "content": msg.get("content") or ""}
+            tool_calls = msg.get("tool_calls") or []
+            if tool_calls:
+                assistant["tool_calls"] = tool_calls
+            messages.append(assistant)
+            calls = [{"name": tc.get("function", {}).get("name"), "args": _args(tc)}
+                     for tc in tool_calls]
+            _emit(sid, {"type": "assistant", "content": assistant["content"], "tool_calls": calls})
+            if not tool_calls:
+                _emit(sid, {"type": "final", "content": assistant["content"]})
+                _finish(sid, "done")
+                return
+            for tc, call in zip(tool_calls, calls):
+                if _cancelled(sid):
+                    _finish(sid, "cancelled")
+                    return
                 result = execute(call["name"], call["args"], ctx)
                 _emit(sid, {"type": "tool", "name": call["name"], "args": call["args"],
                             "result": result, "ok": result.get("ok", False)})
-                payload = json.dumps(result, ensure_ascii=False)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", call["name"]),
-                                 "content": payload[:6000]})
+                                 "content": json.dumps(result, ensure_ascii=False)[:6000]})
         _emit(sid, {"type": "final", "content": "(reached the step limit without a final answer)"})
-        with _LOCK:
-            s["status"] = "done"
-    except Exception as e:
-        _emit(sid, {"type": "error", "content": repr(e)})
-        with _LOCK:
-            s["status"] = "error"
+        _finish(sid, "done")
+    except Exception as exc:
+        _emit(sid, {"type": "error", "content": repr(exc)})
+        _finish(sid, "error")
 
 
 def _args(tc):

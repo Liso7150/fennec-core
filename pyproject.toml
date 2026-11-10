@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "colibri-core"
+version = "1.0.0"
+description = "Shared Colibri service: engine client, supervised agent loop, workspace tools, PWA host."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "psutil>=5.9",
+  "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = ["httpx>=0.27"]
+
+[project.scripts]
+colibri-agent = "colibri_core.server:main"
+
+[tool.setuptools]
+packages = ["colibri_core"]

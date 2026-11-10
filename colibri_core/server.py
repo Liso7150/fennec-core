@@ -1,226 +1,374 @@
+"""Local Colibri service: engine proxy, supervised agent runs, workspace files, PWA host.
+
+Security model: loopback HTTP by default. API calls other than health require the
+`X-Colibri-Client: 1` header, a loopback Host, and a same-origin Origin when one is
+sent (DNS-rebinding/CSRF guard). A non-loopback bind is refused unless an app token
+and TLS are configured. File access is jailed to the configured workspace.
+"""
 from __future__ import annotations
 
+import argparse
+import hmac
+import json
 import os
-import threading
+import sys
+import urllib.request
+from dataclasses import replace
+from pathlib import Path
 
-import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from ncm.config import CKPT, RESULTS, ROOT, Config
-from . import engine, loop
+from . import loop
+from .config import Config, is_loopback, load_config
+from .engine import Engine, EngineError, get_engine
 from .tools import ToolContext, list_dir, read_file
 
-ACTIVE_WORKSPACE = os.environ.get("NCM_WORKSPACE", "D:/NCMUI/workspace")
-app = FastAPI(title="NCM Coder — local coding agent on Colibri")
-NCM = {"ready": False, "cfg": None, "gen": None, "error": None}
-_engine_starting = {"active": False}
+CLIENT_HEADER = "X-Colibri-Client"
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
-def _load_ncm():
-    if NCM["ready"] or NCM["error"]:
-        return
-    try:
-        from generate import load_models
-        if not os.path.exists(os.path.join(CKPT, "tokenizer.pt")):
-            NCM["error"] = "NCM tokenizer not trained yet"
-            return
-        cfg, tok, gen = load_models("cpu")
-        NCM.update(ready=True, cfg=cfg, tok=tok, gen=gen)
-    except Exception as e:
-        NCM["error"] = repr(e)
+class ChatMessage(BaseModel):
+    role: str = Field(pattern="^(system|user|assistant|tool)$")
+    content: str = Field(max_length=200_000)
 
 
-@app.get("/")
-def index():
-    return FileResponse(os.path.join(ROOT, "static", "agent.html"))
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage] = Field(min_length=1, max_length=200)
+    max_tokens: int = Field(default=1024, ge=1, le=8192)
+    temperature: float = Field(default=0.2, ge=0, le=2)
 
 
-@app.get("/api/health")
-def health():
-    return {"app": "NCM Coder", "engine_running": engine.is_running(),
-            "workspace": ACTIVE_WORKSPACE, "ncm_ready": NCM["ready"]}
+class AgentRequest(BaseModel):
+    task: str = Field(min_length=1, max_length=8000)
+    workspace: str | None = None
+    allow_write: bool = False
+    allow_shell: bool = False
+    max_steps: int = Field(default=14, ge=1, le=40)
 
 
-# ---- engine (all Colibri features) --------------------------------------
-@app.get("/api/engine")
-def engine_telemetry():
-    return engine.telemetry()
+class CancelRequest(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
 
 
-@app.post("/api/engine/start")
-def engine_start():
-    if engine.is_running():
-        return {"running": True, "already": True}
-    if _engine_starting["active"]:
-        return {"starting": True}
-    _engine_starting["active"] = True
-
-    def _bg():
-        try:
-            engine.start(wait_s=240)
-        finally:
-            _engine_starting["active"] = False
-    threading.Thread(target=_bg, daemon=True).start()
-    return {"starting": True}
-
-
-@app.post("/api/engine/stop")
-def engine_stop():
-    return engine.stop()
-
-
-@app.get("/api/engine/plan")
-def engine_plan():
-    return engine.plan()
-
-
-@app.get("/api/engine/doctor")
-def engine_doctor():
-    return engine.doctor()
-
-
-@app.get("/api/engine/status")
-def engine_status():
-    return engine.status()
-
-
-@app.get("/api/engine/logs")
-def engine_logs():
-    return engine.logs(80)
-
-
-# ---- hardware (Intel NPU + RTX 4060 + shared RAM + SSD) -----------------
-@app.get("/api/hardware")
-def hardware():
-    return engine.hardware()
-
-
-@app.post("/api/npu/start")
-def npu_start():
-    return engine.ensure_npu()
-
-
-class EmbedReq(BaseModel):
+class EmbedRequest(BaseModel):
     input: str | list[str]
 
 
-@app.post("/api/npu/embed")
-def npu_embed(req: EmbedReq):
+def _host_name(value: str) -> str:
+    value = (value or "").strip().lower()
+    if value.startswith("["):
+        return value[1:value.find("]")] if "]" in value else value
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def _norm(path) -> str:
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def workspace_within(root: Path, requested: str | None) -> Path:
+    base = Path(_norm(root))
+    candidate = Path(_norm(Path(requested).expanduser())) if requested else base
+    if not candidate.is_dir():
+        raise HTTPException(400, "workspace must be an existing directory")
     try:
-        return {"device": engine.npu_health(timeout=1).get("device", "?"),
-                "embeddings": engine.embed(req.input)}
-    except Exception as e:
-        raise HTTPException(503, f"NPU embedding service unavailable: {e}")
+        inside = os.path.commonpath([str(base), str(candidate)]) == str(base)
+    except ValueError:
+        inside = False
+    if not inside:
+        raise HTTPException(403, "workspace must be inside the configured workspace root")
+    return candidate
 
 
-@app.on_event("startup")
-def _startup_npu():
-    threading.Thread(target=engine.ensure_npu, kwargs={"wait_s": 90},
-                     daemon=True).start()
+def _listing(ctx: ToolContext, path: str):
+    try:
+        result = list_dir(ctx, path)
+    except (PermissionError, ValueError, OSError) as exc:
+        raise HTTPException(403, str(exc)) from exc
+    if not result.get("ok"):
+        raise HTTPException(404, result.get("error") or "not a directory")
+    base = "" if result.get("path") in (None, ".") else str(result["path"]).replace("\\", "/")
+    entries = []
+    for entry in result.get("entries", []):
+        name = entry.get("name", "")
+        is_dir = name.endswith("/")
+        name = name.rstrip("/")
+        if not name:
+            continue
+        entries.append({"name": name, "path": f"{base}/{name}" if base else name,
+                        "is_dir": is_dir, "size": entry.get("size")})
+    return {"path": base, "entries": entries}
 
 
-# ---- agent ---------------------------------------------------------------
-class AgentReq(BaseModel):
-    task: str
-    workspace: str | None = None
-    allow_shell: bool = False
-    max_steps: int = 14
+def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
+    client = engine_client or get_engine()
+    hosts = set(LOOPBACK_HOSTS) | {h.strip().lower() for h in
+                                   os.environ.get("COLI_ALLOWED_HOSTS", "").split(",") if h.strip()}
+    if allowed_hosts:
+        hosts |= {h.strip().lower() for h in allowed_hosts if h.strip()}
+
+    app = FastAPI(title="Colibri local service", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.middleware("http")
+    async def guard(request, call_next):
+        name = _host_name(request.headers.get("host", ""))
+        if name not in hosts:
+            return PlainTextResponse("Host not allowed", status_code=400)
+        origin = request.headers.get("origin")
+        if origin and origin not in {f"http://{request.headers.get('host')}",
+                                     f"https://{request.headers.get('host')}"}:
+            return PlainTextResponse("Cross-origin request refused", status_code=403)
+        path = request.url.path
+        if path.startswith("/api/") and path != "/api/health":
+            if request.headers.get(CLIENT_HEADER) != "1":
+                return JSONResponse({"detail": "Missing X-Colibri-Client header"}, status_code=403)
+            token = os.environ.get("COLIBRI_APP_TOKEN", "")
+            if token:
+                auth = request.headers.get("authorization", "")
+                supplied = auth[7:] if auth.lower().startswith("bearer ") else ""
+                if not hmac.compare_digest(supplied, token):
+                    return JSONResponse({"detail": "Invalid or missing app token"}, status_code=401)
+        response = await call_next(request)
+        if path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    def engine_or_503():
+        try:
+            if not client.is_running():
+                raise HTTPException(503, "Colibri engine is not running")
+        except EngineError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        return client
+
+    @app.get("/api/health")
+    def health():
+        try:
+            running = client.is_running()
+        except EngineError:
+            running = False
+        return {"app": "Colibri", "engine_running": running, "workspace": str(config.workspace)}
+
+    @app.post("/api/chat")
+    def chat(req: ChatRequest):
+        engine_or_503()
+        try:
+            message, usage = client.chat([m.model_dump() for m in req.messages],
+                                         max_tokens=req.max_tokens, temperature=req.temperature)
+        except EngineError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        return {"message": message, "usage": usage}
+
+    @app.get("/api/engine")
+    def engine_telemetry():
+        return client.telemetry()
+
+    @app.get("/api/engine/status")
+    def engine_status():
+        return client.status()
+
+    @app.get("/api/engine/logs")
+    def engine_logs():
+        return client.logs(80)
+
+    @app.get("/api/engine/plan")
+    def engine_plan():
+        return client.plan()
+
+    @app.get("/api/engine/doctor")
+    def engine_doctor():
+        return client.doctor()
+
+    @app.post("/api/engine/start")
+    def engine_start():
+        try:
+            if client.is_running():
+                return {"running": True, "already": True}
+        except EngineError:
+            pass
+        import threading
+        threading.Thread(target=client.start, kwargs={"wait_s": 240}, daemon=True).start()
+        return {"starting": True}
+
+    @app.post("/api/engine/stop")
+    def engine_stop():
+        return client.stop()
+
+    @app.get("/api/hardware")
+    def hardware():
+        return client.hardware()
+
+    @app.post("/api/npu/start")
+    def npu_start():
+        try:
+            return client.ensure_npu(enabled=True)
+        except EngineError as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+    @app.post("/api/npu/embed")
+    def npu_embed(req: EmbedRequest):
+        try:
+            return {"device": client.npu_health(timeout=1).get("device", "?"),
+                    "embeddings": client.embed(req.input)}
+        except EngineError as exc:
+            raise HTTPException(503, f"NPU embedding service unavailable: {exc}") from exc
+
+    @app.post("/api/agent/start")
+    def agent_start(req: AgentRequest):
+        engine_or_503()
+        workspace = workspace_within(config.workspace, req.workspace)
+        sid = loop.new_session(req.task, str(workspace), allow_write=req.allow_write,
+                               allow_shell=req.allow_shell, engine_client=client)
+        loop.start_thread(sid, req.max_steps)
+        return {"id": sid, "workspace": str(workspace)}
+
+    @app.get("/api/agent/poll")
+    def agent_poll(id: str, after: int = 0):
+        state = loop.get_steps(id, max(0, after))
+        if state is None:
+            raise HTTPException(404, "unknown session")
+        return state
+
+    @app.post("/api/agent/cancel")
+    def agent_cancel(req: CancelRequest):
+        if req.id not in loop.SESSIONS:
+            raise HTTPException(404, "unknown session")
+        cancelled = loop.cancel(req.id)
+        state = loop.get_steps(req.id, 0)
+        return {"cancelled": cancelled, "status": state["status"] if state else "unknown"}
+
+    @app.get("/api/agent/sessions")
+    def agent_sessions():
+        return {"sessions": [{"id": sid, "task": s["task"], "status": s["status"],
+                              "steps": len(s["steps"])} for sid, s in list(loop.SESSIONS.items())]}
+
+    @app.get("/api/files")
+    def files(path: str = "."):
+        return _listing(ToolContext(workspace=str(config.workspace)), path)
+
+    @app.get("/api/file")
+    def file_read(path: str):
+        try:
+            result = read_file(ToolContext(workspace=str(config.workspace)), path, numbered=False)
+        except (PermissionError, ValueError, OSError) as exc:
+            raise HTTPException(403, str(exc)) from exc
+        if not result.get("ok"):
+            raise HTTPException(404, result.get("error") or "not a file")
+        return {"path": result["path"], "lines": result["lines"], "content": result["content"]}
+
+    web_root = Path(config.web_root)
+    if web_root.is_dir() and (web_root / "index.html").is_file():
+        app.mount("/", StaticFiles(directory=str(web_root), html=True), name="web")
+    else:
+        @app.get("/")
+        def no_web():
+            return {"app": "Colibri", "error": "web_root does not contain index.html",
+                    "web_root": str(web_root)}
+
+    return app
 
 
-@app.post("/api/agent/start")
-def agent_start(req: AgentReq):
-    if not engine.is_running():
-        raise HTTPException(503, "Colibri engine is not running; start it first")
-    ws = req.workspace or ACTIVE_WORKSPACE
-    if not os.path.isdir(ws):
-        os.makedirs(ws, exist_ok=True)
-    sid = loop.new_session(req.task, ws, req.allow_shell)
-    loop.start_thread(sid, req.max_steps)
-    return {"id": sid, "workspace": ws}
+def _http(method: str, url: str, body=None, timeout=30):
+    headers = {CLIENT_HEADER: "1", "Content-Type": "application/json"}
+    token = os.environ.get("COLIBRI_APP_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, method=method, headers=headers,
+                                     data=None if body is None else json.dumps(body).encode())
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=timeout) as response:
+        return json.loads(response.read(4_000_001))
 
 
-@app.get("/api/agent/poll")
-def agent_poll(id: str, after: int = 0):
-    s = loop.get_steps(id, after)
-    if s is None:
-        raise HTTPException(404, "unknown session")
-    return s
+def serve(host="127.0.0.1", port=8787, *, web_root=None, tls_cert=None, tls_key=None):
+    tls_cert = tls_cert or os.environ.get("COLIBRI_TLS_CERTFILE")
+    tls_key = tls_key or os.environ.get("COLIBRI_TLS_KEYFILE")
+    if not is_loopback(host):
+        if not os.environ.get("COLIBRI_APP_TOKEN") or not tls_cert or not tls_key:
+            raise SystemExit("Refusing a non-loopback bind without COLIBRI_APP_TOKEN, "
+                             "COLIBRI_TLS_CERTFILE and COLIBRI_TLS_KEYFILE")
+    config = load_config()
+    if web_root:
+        config = replace(config, web_root=Path(web_root).expanduser().resolve())
+    import uvicorn
+    uvicorn.run(make_app(config, allowed_hosts=[host]), host=host, port=port,
+                ssl_certfile=tls_cert or None, ssl_keyfile=tls_key or None, log_level="info")
 
 
-@app.get("/api/agent/sessions")
-def agent_sessions():
-    return {"sessions": [{"id": k, "task": v["task"], "status": v["status"],
-                          "steps": len(v["steps"])} for k, v in loop.SESSIONS.items()]}
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="colibri-agent",
+        description="Local Colibri service and CLI for the Colibri engine "
+                    "(https://github.com/JustVugg/colibri) with AirLLM fine-tuning "
+                    "(https://github.com/lyogavin/airllm).")
+    sub = parser.add_subparsers(dest="command", required=True)
+    p_serve = sub.add_parser("serve", help="run the local service (default http://127.0.0.1:8787)")
+    p_serve.add_argument("--host", default=os.environ.get("COLIBRI_BIND", "127.0.0.1"))
+    p_serve.add_argument("--port", type=int, default=int(os.environ.get("COLIBRI_PORT", "8787")))
+    p_serve.add_argument("--web-root", default=None)
+    p_status = sub.add_parser("status", help="query a running service")
+    p_status.add_argument("--url", default=os.environ.get("COLIBRI_SERVICE_URL",
+                                                          "http://127.0.0.1:8787"))
+    p_chat = sub.add_parser("chat", help="one-shot chat straight to the engine (no service needed)")
+    p_chat.add_argument("prompt")
+    p_chat.add_argument("--max-tokens", type=int, default=512)
+    p_chat.add_argument("--temperature", type=float, default=0.2)
+    p_agent = sub.add_parser("agent", help="run a supervised task against a running service")
+    p_agent.add_argument("task")
+    p_agent.add_argument("--workspace", default=None)
+    p_agent.add_argument("--allow-write", action="store_true")
+    p_agent.add_argument("--allow-shell", action="store_true")
+    p_agent.add_argument("--max-steps", type=int, default=14)
+    p_agent.add_argument("--url", default=os.environ.get("COLIBRI_SERVICE_URL",
+                                                         "http://127.0.0.1:8787"))
+    args = parser.parse_args(argv)
+
+    if args.command == "serve":
+        serve(args.host, args.port, web_root=args.web_root)
+        return 0
+    if args.command == "status":
+        print(json.dumps(_http("GET", args.url.rstrip("/") + "/api/health")))
+        return 0
+    if args.command == "chat":
+        engine = Engine(load_config())
+        try:
+            message, usage = engine.chat([{"role": "user", "content": args.prompt}],
+                                         max_tokens=args.max_tokens, temperature=args.temperature)
+        except EngineError as exc:
+            print(f"colibri-agent: {exc}", file=sys.stderr)
+            return 2
+        print(message.get("content", ""))
+        if usage:
+            print(json.dumps({"usage": usage}), file=sys.stderr)
+        return 0
+    if args.command == "agent":
+        base = args.url.rstrip("/")
+        try:
+            started = _http("POST", base + "/api/agent/start", {
+                "task": args.task, "workspace": args.workspace,
+                "allow_write": args.allow_write, "allow_shell": args.allow_shell,
+                "max_steps": args.max_steps})
+        except Exception as exc:
+            print(f"colibri-agent: cannot start task: {exc}", file=sys.stderr)
+            return 2
+        sid, after = started["id"], 0
+        import time
+        while True:
+            state = _http("GET", f"{base}/api/agent/poll?id={sid}&after={after}")
+            for step in state["steps"]:
+                kind = step.get("type")
+                if kind == "tool":
+                    print(f"[tool] {step.get('name')} -> {'ok' if step.get('ok') else 'failed'}")
+                elif kind in ("assistant", "final", "error", "cancelled"):
+                    print(f"[{kind}] {step.get('content', '')}")
+            after = state["total"]
+            if state["status"] != "running":
+                return 0 if state["status"] == "done" else 1
+            time.sleep(1)
+    return 0
 
 
-# ---- workspace files -----------------------------------------------------
-@app.get("/api/files")
-def files(path: str = "."):
-    ctx = ToolContext(workspace=ACTIVE_WORKSPACE)
-    return list_dir(ctx, path)
-
-
-@app.get("/api/file")
-def file_read(path: str):
-    ctx = ToolContext(workspace=ACTIVE_WORKSPACE)
-    return read_file(ctx, path)
-
-
-class WorkspaceReq(BaseModel):
-    path: str
-
-
-@app.post("/api/workspace")
-def set_workspace(req: WorkspaceReq):
-    global ACTIVE_WORKSPACE
-    p = os.path.abspath(req.path)
-    if not os.path.isdir(p):
-        raise HTTPException(400, "not a directory")
-    ACTIVE_WORKSPACE = p
-    return {"workspace": p}
-
-
-# ---- NCM concept engine --------------------------------------------------
-@app.get("/api/ncm/health")
-def ncm_health():
-    _load_ncm()
-    cfg = NCM["cfg"] or Config()
-    return {"ready": NCM["ready"], "error": NCM["error"], "device": "cpu",
-            "K": cfg.K, "levels": list(cfg.levels), "seq_len": cfg.seq_len,
-            "codebooks": list(cfg.codebook_sizes), "nfe": cfg.K,
-            "tokens_per_pass": round(cfg.seq_len / cfg.K, 1)}
-
-
-class NcmReq(BaseModel):
-    n: int = 3
-    temp: float = 0.9
-    top_p: float = 0.9
-
-
-@app.post("/api/ncm/generate")
-def ncm_generate(req: NcmReq):
-    _load_ncm()
-    if not NCM["ready"]:
-        raise HTTPException(503, NCM["error"] or "NCM not ready")
-    from generate import run
-    res = run(NCM["cfg"], NCM["gen"], "cpu", n=max(1, min(req.n, 6)),
-              temp=req.temp, top_p=req.top_p, partials=True)
-    return JSONResponse(res)
-
-
-@app.get("/api/ncm/metrics")
-def ncm_metrics():
-    import json
-    out = {}
-    for name in ("tok_train", "gen_train"):
-        p = os.path.join(RESULTS, f"{name}.json")
-        out[name] = json.load(open(p, encoding="utf-8")) if os.path.exists(p) else []
-    ev = os.path.join(RESULTS, "evaluation.json")
-    out["evaluation"] = json.load(open(ev, encoding="utf-8")) if os.path.exists(ev) else None
-    return out
-
-
-app.mount("/static", StaticFiles(directory=os.path.join(ROOT, "static")), name="static")
+if __name__ == "__main__":
+    raise SystemExit(main())
