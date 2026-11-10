@@ -354,7 +354,12 @@ class EngineEnvironmentTests(unittest.TestCase):
         stub = SimpleNamespace(config=SimpleNamespace(backend="auto", cache_root=Path("C:/cache"),
                                                       model="m", api_key="local"))
         with mock.patch.object(engine, "vulkan_loader_present", return_value=True):
-            self.assertEqual(engine.Engine._engine_env(stub).get("COLI_VULKAN"), "1")
+            env = engine.Engine._engine_env(stub)
+            self.assertEqual(env.get("COLI_VULKAN"), "1")
+            self.assertEqual(env.get("COLI_VK_TIER_HOST_GB"), "4")
+        with mock.patch.object(engine, "vulkan_loader_present", return_value=True), \
+                mock.patch.dict(os.environ, {"COLI_VK_TIER_HOST_GB": "9"}):
+            self.assertEqual(engine.Engine._engine_env(stub).get("COLI_VK_TIER_HOST_GB"), "9")
         with mock.patch.object(engine, "vulkan_loader_present", return_value=False):
             self.assertNotIn("COLI_VULKAN", engine.Engine._engine_env(stub))
         stub.config.backend = "cpu"

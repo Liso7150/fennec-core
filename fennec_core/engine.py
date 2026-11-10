@@ -117,6 +117,11 @@ class Engine:
         if self.config.backend == "auto":
             if vulkan_loader_present():
                 env["COLI_VULKAN"] = "1"
+                # 4 GB of host expert pool costs ~6 % decode against the engine's
+                # 13 GB default (13.95 vs 14.88 tok/s, 2026-11-10) and gives back
+                # ~9 GB of RAM; 2 GB collapses to 6.27 tok/s.
+                if "COLI_VK_TIER_HOST_GB" not in env:
+                    env["COLI_VK_TIER_HOST_GB"] = "4"
         else:
             env.update(COLI_VULKAN="0", COLI_METAL="0", COLI_CUDA="0")
             if self.config.backend != "cpu":
