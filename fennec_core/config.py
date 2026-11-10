@@ -63,15 +63,11 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
     if any(k.lower() in {"api_key", "app_token", "token", "fennec_api_key", "fennec_app_token", "coli_api_key"} for k in data):
         raise ConfigError("Secrets belong in environment variables, not configuration JSON")
 
-    def default(windows, portable):
-        p = Path(windows)
-        return str(p if os.name == "nt" and p.is_dir() else home / portable)
-
     values = {
-        "engine_root": default("D:/Colibri", "Colibri"),
-        "suite_root": default("D:/Fennec-Suite", "Fennec-Suite"),
-        "models_root": default("D:/fennec-models", "fennec-models"),
-        "cache_root": default("D:/.cache", ".cache/fennec"),
+        "engine_root": str(home / "Colibri"),
+        "suite_root": str(home / "Fennec-Suite"),
+        "models_root": str(home / "fennec-models"),
+        "cache_root": str(home / ".cache" / "fennec"),
         "model": "", "engine_url": "http://127.0.0.1:8184",
         "backend": "auto", "ctx": 0, "policy": "quality",
     }
