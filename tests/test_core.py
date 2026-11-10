@@ -9,11 +9,11 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from colibri_core import loop
-from colibri_core.config import ConfigError, load_config
-from colibri_core.server import make_app, serve
+from fennec_core import loop
+from fennec_core.config import ConfigError, load_config
+from fennec_core.server import make_app, serve
 
-HEADERS = {"X-Colibri-Client": "1"}
+HEADERS = {"X-Fennec-Client": "1"}
 
 
 class FakeEngine:
@@ -93,7 +93,7 @@ class ClientCase(unittest.TestCase):
         (self.root / "src" / "app.py").write_text("print('hi')\n", encoding="utf-8")
         self.web = self.root / "web"
         self.web.mkdir()
-        (self.web / "index.html").write_text("<!doctype html><title>Colibri</title>", encoding="utf-8")
+        (self.web / "index.html").write_text("<!doctype html><title>Fennec</title>", encoding="utf-8")
         self.engine = FakeEngine()
         self.config = make_config(self.root, self.web)
         loop.SESSIONS.clear()
@@ -108,7 +108,7 @@ class SecurityTests(ClientCase):
     def test_health_needs_no_header(self):
         response = self.client.get("/api/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"app": "Colibri", "engine_running": True,
+        self.assertEqual(response.json(), {"app": "Fennec", "engine_running": True,
                                            "workspace": str(self.root)})
         self.assertEqual(response.headers["cache-control"], "no-store")
 
@@ -127,7 +127,7 @@ class SecurityTests(ClientCase):
         self.assertEqual(response.status_code, 400)
 
     def test_app_token_is_enforced_when_configured(self):
-        with mock.patch.dict(os.environ, {"COLIBRI_APP_TOKEN": "s3cret"}):
+        with mock.patch.dict(os.environ, {"FENNEC_APP_TOKEN": "s3cret"}):
             self.assertEqual(self.client.get("/api/files", headers=HEADERS).status_code, 401)
             wrong = {**HEADERS, "Authorization": "Bearer nope"}
             self.assertEqual(self.client.get("/api/files", headers=wrong).status_code, 401)
@@ -287,7 +287,7 @@ class StaticTests(ClientCase):
     def test_pwa_is_served_same_origin(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Colibri", response.text)
+        self.assertIn("Fennec", response.text)
 
 
 class ConfigTests(unittest.TestCase):
@@ -317,7 +317,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
             path.write_text(json.dumps({"ctx": 0}), encoding="utf-8")
-            env = {"COLIBRI_ENGINE_URL": "http://localhost:9999", "COLIBRI_MODELS": str(path.parent / "m")}
+            env = {"FENNEC_ENGINE_URL": "http://localhost:9999", "FENNEC_MODELS": str(path.parent / "m")}
             config = load_config(path, environ=env, home=Path(tmp))
             self.assertEqual(config.engine_url, "http://localhost:9999")
             self.assertEqual(str(config.models_root), str((path.parent / "m").resolve()))
@@ -329,7 +329,7 @@ class ConfigTests(unittest.TestCase):
             path.write_text(json.dumps({"engine_url": "http://10.0.0.5:8184"}), encoding="utf-8")
             with self.assertRaises(ConfigError):
                 load_config(path, environ={}, home=Path(tmp))
-            config = load_config(path, environ={"COLIBRI_API_KEY": "k"}, home=Path(tmp))
+            config = load_config(path, environ={"FENNEC_API_KEY": "k"}, home=Path(tmp))
             self.assertEqual(config.api_key, "k")
 
     def test_missing_explicit_config_is_an_error(self):

@@ -1,7 +1,7 @@
-"""Local Colibri service: engine proxy, supervised agent runs, workspace files, PWA host.
+"""Local Fennec service: engine proxy, supervised agent runs, workspace files, PWA host.
 
 Security model: loopback HTTP by default. API calls other than health require the
-`X-Colibri-Client: 1` header, a loopback Host, and a same-origin Origin when one is
+`X-Fennec-Client: 1` header, a loopback Host, and a same-origin Origin when one is
 sent (DNS-rebinding/CSRF guard). A non-loopback bind is refused unless an app token
 and TLS are configured. File access is jailed to the configured workspace.
 """
@@ -27,7 +27,7 @@ from .config import Config, is_loopback, load_config
 from .engine import Engine, EngineError, get_engine
 from .tools import ToolContext, list_dir, read_file
 
-CLIENT_HEADER = "X-Colibri-Client"
+CLIENT_HEADER = "X-Fennec-Client"
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
@@ -167,7 +167,7 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
         if close is not None:
             close()
 
-    app = FastAPI(title="Colibri local service", docs_url=None, redoc_url=None,
+    app = FastAPI(title="Fennec local service", docs_url=None, redoc_url=None,
                   openapi_url=None, lifespan=lifespan)
 
     @app.middleware("http")
@@ -182,8 +182,8 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
         path = request.url.path
         if path.startswith("/api/") and path != "/api/health":
             if request.headers.get(CLIENT_HEADER) != "1":
-                return JSONResponse({"detail": "Missing X-Colibri-Client header"}, status_code=403)
-            token = os.environ.get("COLIBRI_APP_TOKEN", "")
+                return JSONResponse({"detail": "Missing X-Fennec-Client header"}, status_code=403)
+            token = os.environ.get("FENNEC_APP_TOKEN", "")
             if token:
                 auth = request.headers.get("authorization", "")
                 supplied = auth[7:] if auth.lower().startswith("bearer ") else ""
@@ -208,7 +208,7 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
             running = client.is_running()
         except EngineError:
             running = False
-        return {"app": "Colibri", "engine_running": running, "workspace": str(config.workspace)}
+        return {"app": "Fennec", "engine_running": running, "workspace": str(config.workspace)}
 
     @app.post("/api/chat")
     def chat(req: ChatRequest):
@@ -344,7 +344,7 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
     else:
         @app.get("/")
         def no_web():
-            return {"app": "Colibri", "error": "web_root does not contain index.html",
+            return {"app": "Fennec", "error": "web_root does not contain index.html",
                     "web_root": str(web_root)}
 
     return app
@@ -352,7 +352,7 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
 
 def _http(method: str, url: str, body=None, timeout=30):
     headers = {CLIENT_HEADER: "1", "Content-Type": "application/json"}
-    token = os.environ.get("COLIBRI_APP_TOKEN", "")
+    token = os.environ.get("FENNEC_APP_TOKEN", "")
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, method=method, headers=headers,
@@ -363,12 +363,12 @@ def _http(method: str, url: str, body=None, timeout=30):
 
 
 def serve(host="127.0.0.1", port=8787, *, web_root=None, tls_cert=None, tls_key=None):
-    tls_cert = tls_cert or os.environ.get("COLIBRI_TLS_CERTFILE")
-    tls_key = tls_key or os.environ.get("COLIBRI_TLS_KEYFILE")
+    tls_cert = tls_cert or os.environ.get("FENNEC_TLS_CERTFILE")
+    tls_key = tls_key or os.environ.get("FENNEC_TLS_KEYFILE")
     if not is_loopback(host):
-        if not os.environ.get("COLIBRI_APP_TOKEN") or not tls_cert or not tls_key:
-            raise SystemExit("Refusing a non-loopback bind without COLIBRI_APP_TOKEN, "
-                             "COLIBRI_TLS_CERTFILE and COLIBRI_TLS_KEYFILE")
+        if not os.environ.get("FENNEC_APP_TOKEN") or not tls_cert or not tls_key:
+            raise SystemExit("Refusing a non-loopback bind without FENNEC_APP_TOKEN, "
+                             "FENNEC_TLS_CERTFILE and FENNEC_TLS_KEYFILE")
     config = load_config()
     if web_root:
         config = replace(config, web_root=Path(web_root).expanduser().resolve())
@@ -379,17 +379,17 @@ def serve(host="127.0.0.1", port=8787, *, web_root=None, tls_cert=None, tls_key=
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        prog="colibri-agent",
-        description="Local Colibri service and CLI for the Colibri engine "
-                    "(https://github.com/JustVugg/colibri) with AirLLM fine-tuning "
+        prog="fennec-agent",
+        description="Local Fennec service and CLI. Engine base idea: Colibri "
+                    "(https://github.com/JustVugg/colibri); fine-tuning: AirLLM "
                     "(https://github.com/lyogavin/airllm).")
     sub = parser.add_subparsers(dest="command", required=True)
     p_serve = sub.add_parser("serve", help="run the local service (default http://127.0.0.1:8787)")
-    p_serve.add_argument("--host", default=os.environ.get("COLIBRI_BIND", "127.0.0.1"))
-    p_serve.add_argument("--port", type=int, default=int(os.environ.get("COLIBRI_PORT", "8787")))
+    p_serve.add_argument("--host", default=os.environ.get("FENNEC_BIND", "127.0.0.1"))
+    p_serve.add_argument("--port", type=int, default=int(os.environ.get("FENNEC_PORT", "8787")))
     p_serve.add_argument("--web-root", default=None)
     p_status = sub.add_parser("status", help="query a running service")
-    p_status.add_argument("--url", default=os.environ.get("COLIBRI_SERVICE_URL",
+    p_status.add_argument("--url", default=os.environ.get("FENNEC_SERVICE_URL",
                                                           "http://127.0.0.1:8787"))
     p_chat = sub.add_parser("chat", help="one-shot chat straight to the engine (no service needed)")
     p_chat.add_argument("prompt")
@@ -401,7 +401,7 @@ def main(argv=None):
     p_agent.add_argument("--allow-write", action="store_true")
     p_agent.add_argument("--allow-shell", action="store_true")
     p_agent.add_argument("--max-steps", type=int, default=14)
-    p_agent.add_argument("--url", default=os.environ.get("COLIBRI_SERVICE_URL",
+    p_agent.add_argument("--url", default=os.environ.get("FENNEC_SERVICE_URL",
                                                          "http://127.0.0.1:8787"))
     args = parser.parse_args(argv)
 
@@ -417,7 +417,7 @@ def main(argv=None):
             message, usage = engine.chat([{"role": "user", "content": args.prompt}],
                                          max_tokens=args.max_tokens, temperature=args.temperature)
         except EngineError as exc:
-            print(f"colibri-agent: {exc}", file=sys.stderr)
+            print(f"fennec-agent: {exc}", file=sys.stderr)
             return 2
         print(message.get("content", ""))
         if usage:
@@ -431,7 +431,7 @@ def main(argv=None):
                 "allow_write": args.allow_write, "allow_shell": args.allow_shell,
                 "max_steps": args.max_steps})
         except Exception as exc:
-            print(f"colibri-agent: cannot start task: {exc}", file=sys.stderr)
+            print(f"fennec-agent: cannot start task: {exc}", file=sys.stderr)
             return 2
         sid, after = started["id"], 0
         import time

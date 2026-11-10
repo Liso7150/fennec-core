@@ -42,14 +42,14 @@ class Engine:
         self._npu_process = None
         self._stt_process = None
         self._lock = threading.Lock()
-        self.log_path = config.cache_root / "colibri" / "engine.log"
-        self.npu_log_path = config.cache_root / "colibri" / "npu.log"
-        self.stt_log_path = config.cache_root / "colibri" / "stt.log"
+        self.log_path = config.cache_root / "fennec" / "engine.log"
+        self.npu_log_path = config.cache_root / "fennec" / "npu.log"
+        self.stt_log_path = config.cache_root / "fennec" / "stt.log"
         self.npu_url = "http://127.0.0.1:8182"
         self.stt_url = "http://127.0.0.1:8183"
 
     def _redact(self, text):
-        for secret in (self.config.api_key, os.environ.get("COLIBRI_APP_TOKEN")):
+        for secret in (self.config.api_key, os.environ.get("FENNEC_APP_TOKEN")):
             if secret:
                 text = text.replace(secret, "[redacted]")
         return text
@@ -89,7 +89,7 @@ class Engine:
 
     def _engine_env(self):
         env = dict(os.environ)
-        for key in ("COLIBRI_APP_TOKEN", "COLIBRI_API_KEY", "COLI_API_KEY",
+        for key in ("FENNEC_APP_TOKEN", "FENNEC_API_KEY", "COLI_API_KEY",
                     "COLI_VULKAN", "COLI_METAL", "COLI_CUDA", "COLI_VK_DEV2"):
             env.pop(key, None)
         env.update(HF_HOME=str(self.config.cache_root / "huggingface"),
@@ -104,13 +104,13 @@ class Engine:
     def _command(self, args):
         launcher = self.config.engine_root / "c" / "coli"
         if not launcher.is_file():
-            raise EngineError("Colibri launcher missing; configure engine_root with an existing installation")
+            raise EngineError("Fennec launcher missing; configure engine_root with an existing installation")
         python, options = spawn_options(self.config.python)
         return [python, str(launcher), *args], options
 
     def _model_args(self):
         if not self.config.model or not Path(self.config.model).is_dir():
-            raise EngineError("Choose an installed model with COLIBRI_MODEL or the model configuration key")
+            raise EngineError("Choose an installed model with FENNEC_MODEL or the model configuration key")
         return ["--model", self.config.model, "--policy", self.config.policy, "--ctx", str(self.config.ctx)]
 
     def _owns_engine(self):
@@ -196,7 +196,7 @@ class Engine:
                 result = subprocess.run(command, cwd=self.config.engine_root, env=self._engine_env(),
                     stdin=subprocess.DEVNULL, stdout=output, stderr=output, timeout=timeout, **options)
             except subprocess.TimeoutExpired as exc:
-                raise EngineError("Colibri diagnostic timed out") from exc
+                raise EngineError("Fennec diagnostic timed out") from exc
             output.seek(0, 2)
             output.seek(max(0, output.tell() - 8000))
             return {"exit": result.returncode, "out": self._redact(output.read().decode("utf-8", "replace"))}

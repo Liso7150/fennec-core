@@ -1,11 +1,11 @@
 """Local speech-to-text sidecar: faster-whisper on the CPU, loopback only.
 
-Started on demand by colibri_core.engine (phone PWA and desktop both use it
+Started on demand by fennec_core.engine (phone PWA and desktop both use it
 through POST /api/stt). The model is downloaded once into the shared HF cache
 (HF_HOME under cache_root) by faster-whisper itself; audio never leaves the
 machine.
 
-    python -m colibri_core.stt --port 8183 [--model base.en]
+    python -m fennec_core.stt --port 8183 [--model base.en]
 
 Endpoints: GET /health, POST /transcribe (raw audio body: webm/ogg/wav/mp4).
 """
@@ -49,7 +49,7 @@ def transcribe_bytes(data: bytes, language: str | None = None) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ColibriSTT/1.0"
+    server_version = "FennecSTT/1.0"
 
     def _reply(self, code, payload):
         body = json.dumps(payload).encode("utf-8")
@@ -104,7 +104,7 @@ def serve(port=8183, model_name=DEFAULT_MODEL, host="127.0.0.1"):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Local Colibri speech-to-text sidecar")
+    parser = argparse.ArgumentParser(description="Local Fennec speech-to-text sidecar")
     parser.add_argument("--port", type=int, default=int(os.environ.get("COLI_STT_PORT", "8183")))
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--host", default="127.0.0.1")

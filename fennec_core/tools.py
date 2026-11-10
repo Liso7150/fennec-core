@@ -192,7 +192,7 @@ def _run_process(ctx, command, *, shell=False):
     if not ctx.allow_shell:
         raise PermissionError("process execution requires allow_shell; it is NOT sandboxed")
     env = {key: value for key, value in os.environ.items()
-           if key not in {"COLIBRI_API_KEY", "COLI_API_KEY", "COLIBRI_APP_TOKEN"}}
+           if key not in {"FENNEC_API_KEY", "COLI_API_KEY", "FENNEC_APP_TOKEN"}}
     options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         try:
@@ -247,7 +247,7 @@ def semantic_search(ctx, query, k=8):
     from .engine import get_engine
     engine = ctx.engine_client or get_engine()
     root = _safe(ctx, ".")
-    cache_root = Path(ctx.cache_root or engine.config.cache_root) / "colibri-embed"
+    cache_root = Path(ctx.cache_root or engine.config.cache_root) / "fennec-embed"
     cache_root.mkdir(parents=True, exist_ok=True)
     ws_key = hashlib.sha1(os.path.abspath(root).encode()).hexdigest()[:12]
     cache_path = cache_root / (ws_key + ".json")

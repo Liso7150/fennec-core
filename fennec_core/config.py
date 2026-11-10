@@ -49,18 +49,18 @@ class Config:
 def load_config(path: str | Path | None = None, *, environ=None, home: Path | None = None) -> Config:
     env = os.environ if environ is None else environ
     home = Path(home or Path.home()).resolve()
-    location = Path(path or env.get("COLIBRI_CONFIG") or home / ".colibri" / "config.json").expanduser().resolve()
+    location = Path(path or env.get("FENNEC_CONFIG") or home / ".fennec" / "config.json").expanduser().resolve()
     data = {}
     if location.is_file():
         try:
             data = json.loads(location.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            raise ConfigError("Cannot read Colibri configuration JSON") from exc
-    elif path or env.get("COLIBRI_CONFIG"):
-        raise ConfigError("The explicitly selected Colibri configuration does not exist")
+            raise ConfigError("Cannot read Fennec configuration JSON") from exc
+    elif path or env.get("FENNEC_CONFIG"):
+        raise ConfigError("The explicitly selected Fennec configuration does not exist")
     if not isinstance(data, dict):
-        raise ConfigError("Colibri configuration must be a JSON object")
-    if any(k.lower() in {"api_key", "app_token", "token", "colibri_api_key", "colibri_app_token", "coli_api_key"} for k in data):
+        raise ConfigError("Fennec configuration must be a JSON object")
+    if any(k.lower() in {"api_key", "app_token", "token", "fennec_api_key", "fennec_app_token", "coli_api_key"} for k in data):
         raise ConfigError("Secrets belong in environment variables, not configuration JSON")
 
     def default(windows, portable):
@@ -69,19 +69,19 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
 
     values = {
         "engine_root": default("D:/Colibri", "Colibri"),
-        "suite_root": default("D:/Colibri-Suite", "Colibri-Suite"),
-        "models_root": default("D:/colibri-models", "colibri-models"),
-        "cache_root": default("D:/.cache", ".cache/colibri"),
+        "suite_root": default("D:/Fennec-Suite", "Fennec-Suite"),
+        "models_root": default("D:/fennec-models", "fennec-models"),
+        "cache_root": default("D:/.cache", ".cache/fennec"),
         "model": "", "engine_url": "http://127.0.0.1:8184",
         "backend": "auto", "ctx": 0, "policy": "quality",
     }
     keys = set(values) | {"python", "web_root", "workspace"}
     values.update({k: v for k, v in data.items() if k in keys})
     for variable, key in {
-        "COLIBRI_HOME": "engine_root", "COLIBRI_MODELS": "models_root",
-        "COLIBRI_CACHE": "cache_root", "COLIBRI_PYTHON": "python",
-        "COLIBRI_MODEL": "model", "COLIBRI_ENGINE_URL": "engine_url",
-        "COLIBRI_WORKSPACE": "workspace",
+        "FENNEC_HOME": "engine_root", "FENNEC_MODELS": "models_root",
+        "FENNEC_CACHE": "cache_root", "FENNEC_PYTHON": "python",
+        "FENNEC_MODEL": "model", "FENNEC_ENGINE_URL": "engine_url",
+        "FENNEC_WORKSPACE": "workspace",
     }.items():
         if variable in env:
             values[key] = env[variable]
@@ -90,7 +90,7 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
             raise ConfigError(f"{key} must be a nonempty string")
     for key in ("engine_root", "suite_root", "models_root", "cache_root"):
         values[key] = _path(values[key], location.parent)
-    values["web_root"] = _path(values.get("web_root", str(values["suite_root"] / "colibri-coding-agent" / "web")), location.parent)
+    values["web_root"] = _path(values.get("web_root", str(values["suite_root"] / "fennec-coding-agent" / "web")), location.parent)
     values["workspace"] = _path(values.get("workspace", str(values["suite_root"])), location.parent)
     if values["model"]:
         values["model"] = str(_path(values["model"], values["models_root"]))
@@ -117,8 +117,8 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
     if not valid:
         raise ConfigError("engine_url must be an HTTP(S) origin without credentials, path or query")
     values["engine_url"] = values["engine_url"].rstrip("/")
-    key = env.get("COLIBRI_API_KEY") or env.get("COLI_API_KEY")
+    key = env.get("FENNEC_API_KEY") or env.get("COLI_API_KEY")
     if not key and not is_loopback(url.hostname):
-        raise ConfigError("A non-loopback engine requires COLIBRI_API_KEY or COLI_API_KEY")
+        raise ConfigError("A non-loopback engine requires FENNEC_API_KEY or COLI_API_KEY")
     values["api_key"] = key or "local"
     return Config(**values)

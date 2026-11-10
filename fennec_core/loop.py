@@ -8,7 +8,7 @@ import uuid
 from . import engine
 from .tools import ToolContext, execute, openai_tools
 
-SYSTEM = """You are Colibri Coder, a local coding agent running on the Colibri inference engine \
+SYSTEM = """You are Fennec Desktopr, a local coding agent running on the Fennec inference engine \
 (a device-tiered MoE decoder). You solve coding tasks in the user's workspace by calling tools.
 
 Workflow:
