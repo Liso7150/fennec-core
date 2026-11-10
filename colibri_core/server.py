@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import urllib.request
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -109,7 +110,16 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
     if allowed_hosts:
         hosts |= {h.strip().lower() for h in allowed_hosts if h.strip()}
 
-    app = FastAPI(title="Colibri local service", docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(_app):
+        yield
+        # Stop an engine this service spawned; attached engines are never stopped.
+        close = getattr(client, "close", None)
+        if close is not None:
+            close()
+
+    app = FastAPI(title="Colibri local service", docs_url=None, redoc_url=None,
+                  openapi_url=None, lifespan=lifespan)
 
     @app.middleware("http")
     async def guard(request, call_next):

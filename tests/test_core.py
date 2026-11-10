@@ -130,6 +130,15 @@ class SecurityTests(ClientCase):
             with self.assertRaises(SystemExit):
                 serve("0.0.0.0", 8787)
 
+    def test_service_shutdown_closes_the_engine_client(self):
+        engine = FakeEngine()
+        closed = []
+        engine.close = lambda: closed.append(True)
+        app = make_app(self.config, engine, allowed_hosts=["127.0.0.1"])
+        with TestClient(app, base_url="http://127.0.0.1") as lifecycle:
+            self.assertEqual(lifecycle.get("/api/health").status_code, 200)
+        self.assertEqual(closed, [True])
+
 
 class FileTests(ClientCase):
     def test_listing_contract(self):
