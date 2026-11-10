@@ -33,3 +33,22 @@ Engine base idea: [JustVugg/colibri](https://github.com/JustVugg/colibri) —
 device-tiered MoE inference. Fine-tuning:
 [AirLLM](https://github.com/lyogavin/airllm). Part of the
 [Fennec suite](https://github.com/Liso7150/fennec-environment-setup).
+
+## Context economy (1.4.1)
+
+The agent loop compacts only the payload it sends to the model; the transcript the
+UI shows is untouched. A tool result keeps its head and tail, so a cut JSON blob
+no longer loses its end; a repeated result becomes
+`[identical to the result of <call>; N chars not repeated]`; and a total budget
+shrinks the oldest tool results first, never the system prompt, the user task or
+the newest result.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FENNEC_AGENT_RESULT_CHARS` | 6000 | per-result cap (floor 600) |
+| `FENNEC_AGENT_CONTEXT_BUDGET` | 48000 | characters sent per step (never below the result cap) |
+
+Savings are reported per session in `/api/agent/poll` usage as
+`context_chars_before`, `context_chars_after`, `context_elided` and
+`context_deduped`. Measured on a representative transcript with the defaults:
+28,117 -> 18,755 characters per step (33.3 % fewer).

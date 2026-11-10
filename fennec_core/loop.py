@@ -6,6 +6,7 @@ import time
 import uuid
 
 from . import engine
+from .context import compact, limits
 from .tools import ToolContext, execute, openai_tools
 
 SYSTEM = """You are Fennec Desktopr, a local coding agent running on the Fennec inference engine \
@@ -110,12 +111,15 @@ def run_agent(sid: str, max_steps: int = 14):
     messages = [{"role": "system", "content": SYSTEM + f"\n\nWorkspace: {ctx.workspace}"},
                 {"role": "user", "content": session["task"]}]
     tools = openai_tools(ctx)
+    budget = limits()
+    seen: dict[str, str] = {}
     try:
         for _ in range(max(1, min(max_steps, MAX_STEPS))):
             if _cancelled(sid):
                 _finish(sid, "cancelled")
                 return
-            msg, usage = client.chat(messages, tools=tools)
+            payload, context_stats = compact(messages, seen=seen, **budget)
+            msg, usage = client.chat(payload, tools=tools)
             if _cancelled(sid):
                 _finish(sid, "cancelled")
                 return
@@ -125,6 +129,9 @@ def run_agent(sid: str, max_steps: int = 14):
                     for key, value in (usage or {}).items():
                         if isinstance(value, int):
                             current["usage"][key] = current["usage"].get(key, 0) + value
+                    for key in ("chars_before", "chars_after", "elided", "deduped"):
+                        current["usage"]["context_" + key] = (current["usage"].get("context_" + key, 0)
+                                                              + context_stats[key])
             assistant = {"role": "assistant", "content": msg.get("content") or ""}
             reasoning = msg.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning:
@@ -149,7 +156,7 @@ def run_agent(sid: str, max_steps: int = 14):
                 _emit(sid, {"type": "tool", "name": call["name"], "args": call["args"],
                             "result": result, "ok": result.get("ok", False)})
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", call["name"]),
-                                 "content": json.dumps(result, ensure_ascii=False)[:6000]})
+                                 "content": json.dumps(result, ensure_ascii=False)})
         _emit(sid, {"type": "final", "content": "(reached the step limit without a final answer)"})
         _finish(sid, "done")
     except Exception as exc:
