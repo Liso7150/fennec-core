@@ -26,6 +26,23 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None  # Never forward credentials to another origin.
 
 
+VULKAN_LINUX = ("/usr/lib/x86_64-linux-gnu/libvulkan.so.1", "/usr/lib64/libvulkan.so.1",
+                 "/usr/lib/libvulkan.so.1")
+
+
+def vulkan_loader_present(exists=None, system=None, environ=None):
+    """A Vulkan loader on disk is what makes COLI_VULKAN=1 startable."""
+    probe = os.path.exists if exists is None else exists
+    name = platform.system() if system is None else system
+    env = os.environ if environ is None else environ
+    if name == "Darwin":
+        return False
+    if name == "Windows":
+        root = env.get("SystemRoot") or env.get("SYSTEMROOT") or "C:\\Windows"
+        return probe(os.path.join(root, "System32", "vulkan-1.dll"))
+    return any(probe(candidate) for candidate in VULKAN_LINUX)
+
+
 def spawn_options(python):
     if os.name == "nt":
         windowless = Path(python).with_name("pythonw.exe")
@@ -94,8 +111,13 @@ class Engine:
             env.pop(key, None)
         env.update(HF_HOME=str(self.config.cache_root / "huggingface"),
                    COLI_MODEL=self.config.model, COLI_API_KEY=self.config.api_key)
-        # serve has no --backend flag; auto delegates detection to coli.
-        if self.config.backend != "auto":
+        # serve has no --backend flag. `auto` still needs the request: without it the
+        # engine logs "COLI_VULKAN is not set: the Vulkan device stays unused" and runs
+        # CPU + RAM + SSD only. --auto-tier then plans GPU, host pool and disk stream.
+        if self.config.backend == "auto":
+            if vulkan_loader_present():
+                env["COLI_VULKAN"] = "1"
+        else:
             env.update(COLI_VULKAN="0", COLI_METAL="0", COLI_CUDA="0")
             if self.config.backend != "cpu":
                 env["COLI_" + self.config.backend.upper()] = "1"

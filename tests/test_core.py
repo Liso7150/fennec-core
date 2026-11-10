@@ -338,5 +338,28 @@ class ConfigTests(unittest.TestCase):
                 load_config(Path(tmp) / "missing.json", environ={}, home=Path(tmp))
 
 
+class EngineEnvironmentTests(unittest.TestCase):
+    def test_vulkan_loader_detection_per_platform(self):
+        from fennec_core import engine
+        self.assertTrue(engine.vulkan_loader_present(exists=lambda p: p.endswith("vulkan-1.dll"),
+                                                     system="Windows", environ={"SystemRoot": "C:/Windows"}))
+        self.assertFalse(engine.vulkan_loader_present(exists=lambda p: False, system="Windows", environ={}))
+        self.assertFalse(engine.vulkan_loader_present(exists=lambda p: True, system="Darwin", environ={}))
+        self.assertTrue(engine.vulkan_loader_present(exists=lambda p: p.endswith("libvulkan.so.1"),
+                                                     system="Linux", environ={}))
+
+    def test_auto_requests_the_gpu_and_cpu_switches_it_off(self):
+        from types import SimpleNamespace
+        from fennec_core import engine
+        stub = SimpleNamespace(config=SimpleNamespace(backend="auto", cache_root=Path("C:/cache"),
+                                                      model="m", api_key="local"))
+        with mock.patch.object(engine, "vulkan_loader_present", return_value=True):
+            self.assertEqual(engine.Engine._engine_env(stub).get("COLI_VULKAN"), "1")
+        with mock.patch.object(engine, "vulkan_loader_present", return_value=False):
+            self.assertNotIn("COLI_VULKAN", engine.Engine._engine_env(stub))
+        stub.config.backend = "cpu"
+        self.assertEqual(engine.Engine._engine_env(stub).get("COLI_VULKAN"), "0")
+
+
 if __name__ == "__main__":
     unittest.main()
