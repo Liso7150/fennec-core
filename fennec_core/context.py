@@ -19,6 +19,8 @@ import hashlib
 import json
 import os
 
+from . import rust_bridge
+
 DEFAULT_BUDGET_CHARS = 48_000
 DEFAULT_RESULT_CHARS = 6_000
 MIN_RESULT_CHARS = 600
@@ -62,14 +64,34 @@ def _size(message):
     return total
 
 
+def _delegates(messages, seen):
+    """The one shape the port wins: opted in, nothing seen yet, and huge.
+
+    A warm transcript is the common case and the worst case for the pipe - the
+    parent would re-render every byte the port already has. `bench_bridge` has
+    the numbers behind each of the three conditions.
+    """
+    return (rust_bridge.enabled() and not seen
+            and rust_bridge.payload_chars(messages) >= rust_bridge.min_chars())
+
+
 def compact(messages, *, budget_chars=DEFAULT_BUDGET_CHARS, result_chars=DEFAULT_RESULT_CHARS,
             seen=None, floor_chars=MIN_RESULT_CHARS):
     """Return ``(payload, stats)``; never mutates ``messages``.
 
     ``seen`` maps a result hash to the tool call that produced it, so duplicates
     are caught across steps too; pass the same dict on every call in one run.
+    Above `_delegates`' narrow conditions the work goes to the Rust port and
+    comes back identical; the Python body below is the path it almost always
+    takes, and the fallback when the port is not there.
     """
     seen = {} if seen is None else seen
+    if _delegates(messages, seen):
+        through = rust_bridge.compact(messages, budget_chars=budget_chars,
+                                      result_chars=result_chars, floor_chars=floor_chars,
+                                      seen=seen)
+        if through is not None:
+            return through
     before = sum(_size(message) for message in messages)
     payload = []
     elided = deduped = 0

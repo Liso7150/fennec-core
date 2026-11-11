@@ -1,0 +1,14 @@
+[package]
+name = "fennec-economy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent context economy: head/tail elision, duplicate references, character budget."
+
+[dependencies]
+serde_json.workspace = true
+sha2.workspace = true
+fennec-pyjson.workspace = true
+
+[dev-dependencies]
+serde.workspace = true

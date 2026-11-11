@@ -37,9 +37,22 @@ JEV_ERROR_BYTES = 60_000
 OPENBOT_EVENT_CAP = 20_000
 
 
+def _split(url: str):
+    """`urlsplit`, or None when the netloc will not parse at all.
+
+    urllib raises for a bracketed literal that is not an address, and a browser
+    request built from model text must never turn into an exception - every
+    failure in this module is a returned error.
+    """
+    try:
+        return urlsplit(url)
+    except ValueError:
+        return None
+
+
 def _loopback(origin: str) -> bool:
-    parts = urlsplit(origin)
-    if parts.scheme != "http" or not parts.hostname:
+    parts = _split(origin)
+    if parts is None or parts.scheme != "http" or not parts.hostname:
         return False
     if parts.username or parts.password:
         # "http://user:pw@127.0.0.1" reaches 127.0.0.1 but carries a secret to it.
@@ -54,7 +67,11 @@ def _loopback(origin: str) -> bool:
 
 def _blocked_host(url: str) -> str:
     """Refuse the addresses a browser must not be pointed at by a prompt."""
-    host = urlsplit(url).hostname or ""
+    parts = _split(url)
+    if parts is None:
+        return ("web_task will not browse that url: its host is not a parseable "
+                "address")
+    host = parts.hostname or ""
     try:
         address = ip_address(host)
     except ValueError:
@@ -81,6 +98,13 @@ def _opener():
 
 
 def redact(text: str, environ=None) -> str:
+    """Fennec's own credentials, then any bearer token.
+
+    The Rust port does the identical work - `fennec-rs redact` and the golden in
+    `rust/goldens/redact.jsonl` pin it - and is faster at the batch, but every
+    size measured costs more through the pipe than here, so the live path stays
+    in-process. See `fennec_core.rust_bridge` for the numbers.
+    """
     environ = os.environ if environ is None else environ
     for key in REDACT_ENV_KEYS:
         secret = environ.get(key)

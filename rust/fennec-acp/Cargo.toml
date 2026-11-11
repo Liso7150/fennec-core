@@ -1,0 +1,10 @@
+[package]
+name = "fennec-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ACP NDJSON framing and the streamed-update bounds, ported from fennec_core.acp."
+
+[dependencies]
+serde_json.workspace = true
+fennec-pyjson.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "fennec-pyjson"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Byte-exact clone of Python json.dumps(value, ensure_ascii=False) over serde_json::Value."
+
+[dependencies]
+serde_json.workspace = true

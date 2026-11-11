@@ -1,0 +1,11 @@
+[package]
+name = "fennec-outlets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Outlet redaction and the loopback/reserved-address gate, ported from fennec_core.outlets."
+
+[dependencies]
+
+[dev-dependencies]
+serde_json.workspace = true

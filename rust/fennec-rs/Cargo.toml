@@ -1,0 +1,18 @@
+[package]
+name = "fennec-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runnable form of the Rust port: the ported glue, measured and served over NDJSON."
+
+[[bin]]
+name = "fennec-rs"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+fennec-acp.workspace = true
+fennec-economy.workspace = true
+fennec-outlets.workspace = true
+fennec-preflight.workspace = true
+fennec-pyjson.workspace = true
