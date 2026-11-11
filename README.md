@@ -26,6 +26,27 @@ the duplicated logic that previously lived in the desktop (JS), coding-agent
   plus NPU semantic search.
 - `fennec_core/server.py` — FastAPI agent server, chat with reasoning/vision, `/api/stt`.
 - `fennec_core/stt.py` — local faster-whisper transcription sidecar.
+- `fennec_core/setup_wizard.py` — headless first-run setup behind `fennec setup`:
+  detects Python, the engine checkout and models, checks dependencies, and writes
+  the shared config atomically (backing up an existing file).
+
+## Headless setup
+
+`fennec setup` runs this module on a server or CI box. It writes exactly the
+same keys as the desktop wizard (`engine_root`, `suite_root`, `models_root`,
+`cache_root`, `python`, `model`, `engine_url`, `workspace`, `web_root`,
+`backend`, `ctx`, `policy`) and never stores a secret.
+
+```bash
+fennec setup                                        # prompts with detected defaults
+fennec setup --yes --engine-root /opt/Colibri       # noninteractive
+fennec setup --dry-run --json                       # print the config, write nothing
+fennec setup --yes --install-deps                   # pip install missing core deps first
+```
+
+The engine checkout must contain `c/coli` and `c/openai_server.py`; models are
+optional. An existing config is backed up to `config.json.bak-fennec-setup` and
+replaced atomically after validation.
 
 ## Credits
 
