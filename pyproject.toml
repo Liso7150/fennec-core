@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fennec-core"
-version = "1.5.1"
+version = "1.6.0"
 description = "Shared Fennec service: engine client, supervised agent loop, workspace tools, PWA host."
 readme = "README.md"
 requires-python = ">=3.10"
