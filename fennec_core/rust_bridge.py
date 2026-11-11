@@ -4,16 +4,18 @@
 so the modules that used to do this arithmetic in CPython can hand their work
 over. It is opt-in (`FENNEC_RUST=1`), because `bench_bridge` in
 `benchmarks/bench.py` measured what the pipe actually costs on the shipped
-workload: a 24-turn session replay through the port takes 655 ms against 85 ms in
-CPython - 7.7x worse - since the parent has to re-render every byte the port has
-already seen before the port can look at it. The one shape the port wins is the
-first pass of a transcript that is already huge (8 MB: 59 ms against 69 ms), which
-is why `compact` only delegates when nothing has been seen yet and the payload is
-over the gate. Both together are rare, so the default is the Python that measured
-faster.
+workload: delegating every turn made a 24-turn replay several times slower than
+CPython, since the parent has to re-render every byte the port has already seen
+before the port can look at it. With the cold-only gate below that same replay is
+a wash - 82.1 ms in CPython against 82.7 ms through the port, 0.993 - because the
+warm turns stay in Python. What the port still wins is the first pass of a
+transcript that is already huge: 8.08 MB / 409 messages measures 72.7 ms against
+52.9 ms, 1.37x, and the crossover is 207 messages. That is why `compact` only
+delegates when nothing has been seen yet and the payload is over the gate, and why
+the default stays Python: both conditions together are rare.
 
 Redaction is not delegated at all. The ported redactor is faster than CPython at
-the work itself - 20 000 payloads in 20 ms against 60 - but it runs on one string
+the work itself - 20 000 payloads in 18.6 ms against 63.8 - but it runs on one string
 at a time, the pipe lost at every size up to 8 000 000 characters, and a live key
 would have to travel down that pipe by hand: the child inherits a snapshot of the
 environment taken at spawn, so a secret set afterwards would stay in the clear.
