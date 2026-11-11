@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 
-from . import engine
+from . import engine, tokeneconomizer
 from .context import compact, limits
 from .tools import ToolContext, execute, openai_tools
 
@@ -108,7 +108,12 @@ def run_agent(sid: str, max_steps: int = 14):
         return
     ctx = session["ctx"]
     client = ctx.engine_client or engine
-    messages = [{"role": "system", "content": SYSTEM + f"\n\nWorkspace: {ctx.workspace}"},
+    bridge = tokeneconomizer.Bridge(ctx.workspace, sid, session["task"])
+    learned = bridge.start()
+    system = SYSTEM + f"\n\nWorkspace: {ctx.workspace}"
+    if learned:
+        system += "\n\n" + learned
+    messages = [{"role": "system", "content": system},
                 {"role": "user", "content": session["task"]}]
     tools = openai_tools(ctx)
     budget = limits()
@@ -142,12 +147,16 @@ def run_agent(sid: str, max_steps: int = 14):
             messages.append(assistant)
             calls = [{"name": tc.get("function", {}).get("name"), "args": _args(tc)}
                      for tc in tool_calls]
+            bridge.assistant(assistant["content"], [
+                (tc.get("id", call["name"]), call["name"], call["args"])
+                for tc, call in zip(tool_calls, calls)], usage)
             _emit(sid, {"type": "assistant", "content": assistant["content"],
                         "reasoning": reasoning or "", "tool_calls": calls})
             if not tool_calls:
                 _emit(sid, {"type": "final", "content": assistant["content"]})
                 _finish(sid, "done")
                 return
+            notes = []
             for tc, call in zip(tool_calls, calls):
                 if _cancelled(sid):
                     _finish(sid, "cancelled")
@@ -155,13 +164,24 @@ def run_agent(sid: str, max_steps: int = 14):
                 result = execute(call["name"], call["args"], ctx)
                 _emit(sid, {"type": "tool", "name": call["name"], "args": call["args"],
                             "result": result, "ok": result.get("ok", False)})
+                rendered = json.dumps(result, ensure_ascii=False)
+                bridge.tool_result(tc.get("id", call["name"]), rendered,
+                                   bool(result.get("ok", False)))
+                note = bridge.after_tool(call["name"], call["args"], rendered,
+                                         bool(result.get("ok", False)))
+                if note:
+                    notes.append(note)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", call["name"]),
-                                 "content": json.dumps(result, ensure_ascii=False)})
+                                 "content": rendered})
+            if notes:
+                messages.append({"role": "user", "content": "\n\n".join(notes)})
         _emit(sid, {"type": "final", "content": "(reached the step limit without a final answer)"})
         _finish(sid, "done")
     except Exception as exc:
         _emit(sid, {"type": "error", "content": repr(exc)})
         _finish(sid, "error")
+    finally:
+        bridge.end()
 
 
 def _args(tc):
