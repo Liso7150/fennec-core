@@ -92,8 +92,7 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
         values["model"] = str(_path(values["model"], values["models_root"]))
     executable = values.get("python")
     if not executable:
-        venv = values["engine_root"] / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        executable = str(venv) if venv.is_file() else sys.executable
+        executable = shutil.which("python") or shutil.which("python3") or sys.executable
     elif not Path(executable).is_absolute():
         executable = shutil.which(executable) or str(_path(executable, location.parent))
     values["python"] = executable
