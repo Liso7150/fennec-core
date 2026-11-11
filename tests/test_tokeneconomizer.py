@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fennec_core import tokeneconomizer as te
 
@@ -51,6 +52,8 @@ class BridgeTests(unittest.TestCase):
         hook = StubHook()
         te._LOADED, te._HOOK = True, hook
         bridge = te.Bridge("/work", "sid-2", "fix it")
+        bridge._enabled = True
+        bridge._hook = hook
         bridge.start()
         bridge.assistant("checking", [("c1", "read_file", {"path": "a.py"})],
                          {"prompt_tokens": 10, "completion_tokens": 4})
@@ -76,6 +79,8 @@ class BridgeTests(unittest.TestCase):
         hook = StubHook()
         te._LOADED, te._HOOK = True, hook
         bridge = te.Bridge("/work", "sid-3", "task")
+        bridge._enabled = True
+        bridge._hook = hook
         bridge.after_tool("run_python", {}, "boom", False)
         self.assertEqual(hook.payloads[-1]["hook_event_name"], "PostToolUseFailure")
         self.assertEqual(hook.payloads[-1]["tool_response"]["exit_code"], 1)

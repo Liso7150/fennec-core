@@ -141,7 +141,7 @@ class Bridge:
         self.workspace = str(workspace)
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.task = task or ""
-        self._hook = _load()
+        self._hook = _load() if _requested() else None
         self._enabled = self._hook is not None
         self._mid = 0
         self.transcript = str(Path.home() / ".fennec" / "sessions" / f"{self.session_id}.jsonl")
@@ -161,6 +161,7 @@ class Bridge:
         if not self._enabled:
             return
         try:
+            os.makedirs(os.path.dirname(self.transcript), exist_ok=True)
             with open(self.transcript, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError:
