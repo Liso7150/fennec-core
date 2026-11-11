@@ -20,6 +20,7 @@ import uuid
 from pathlib import Path
 
 _CANDIDATES = ("FENNEC_TOKENECONOMIZER", "TE_CORE_PATH")
+_OFF = ("0", "false", "no", "off")
 _HOOK = None
 _LOADED = False
 _FOLD_LOCK = threading.Lock()
@@ -34,9 +35,13 @@ def _requested() -> bool:
     """TokenEconomizer runs only where it was installed for Fennec.
 
     A pip copy that happens to be importable must not switch it on for every
-    workspace, and tests that sandbox the home directory stay untouched.
+    workspace, an explicit 0 switches it off for this process, and tests that
+    sandbox the home directory stay untouched.
     """
-    if os.environ.get("FENNEC_TOKENECONOMIZER") or os.environ.get("TE_CORE_PATH"):
+    marker = os.environ.get("FENNEC_TOKENECONOMIZER", "").strip().casefold()
+    if marker in _OFF:
+        return False
+    if marker or os.environ.get("TE_CORE_PATH"):
         return True
     return (Path.home() / ".fennec" / "tokeneconomizer.path").is_file()
 
@@ -237,9 +242,10 @@ class Bridge:
         with _FOLD_LOCK:
             try:
                 _install_inline_fold()
-                self._call(self._payload("Stop", stop_hook_active=False))
-                self._call(self._payload("SessionEnd", reason=reason))
             except Exception:
                 pass
+            try:
+                self._call(self._payload("Stop", stop_hook_active=False))
+                self._call(self._payload("SessionEnd", reason=reason))
             finally:
                 _restore_spawn()

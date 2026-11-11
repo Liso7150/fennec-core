@@ -21,6 +21,10 @@ class EngineError(RuntimeError):
     pass
 
 
+class EngineCancelled(EngineError):
+    """The turn was aborted while the engine was still answering."""
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None  # Never forward credentials to another origin.
@@ -280,6 +284,114 @@ class Engine:
         except (KeyError, IndexError, TypeError) as exc:
             raise EngineError("Invalid chat response from engine") from exc
 
+    def chat_stream(self, messages, tools=None, tool_choice="auto", max_tokens=2048,
+                    temperature=0.2, timeout=600, reasoning_effort=None, enable_thinking=None,
+                    abort=None):
+        """Yield stream events for one completion, then a final ``result`` event.
+
+        Events: ``text`` / ``reasoning`` deltas, ``tool_delta`` per fragment,
+        ``finish`` when the engine names a stop reason, and
+        ``result`` = {"message", "usage", "finish_reason"}. ``abort`` is polled
+        between SSE lines, so a cancelled turn keeps the partial message.
+        """
+        body = {"model": self.model_id(), "messages": messages, "max_tokens": max_tokens,
+                "temperature": temperature, "stream": True}
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
+        if enable_thinking is not None:
+            body["enable_thinking"] = bool(enable_thinking)
+        if tools:
+            body.update(tools=tools, tool_choice=tool_choice)
+        request = urllib.request.Request(
+            self.config.engine_url + "/v1/chat/completions",
+            headers={"Content-Type": "application/json", "Accept": "text/event-stream",
+                     "Authorization": f"Bearer {self.config.api_key}"},
+            data=json.dumps(body).encode())
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+        content, reasoning, usage, finish = "", "", {}, None
+        calls: dict = {}
+        cancelled = False
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                if "text/event-stream" not in (response.headers.get("content-type") or ""):
+                    payload = json.loads(response.read(4_000_001))
+                    choice = payload["choices"][0]
+                    message, plain_usage = self._result(choice.get("message") or {}, payload)
+                    yield {"type": "text", "text": message.get("content") or ""}
+                    yield {"type": "result", "message": message, "usage": plain_usage,
+                           "finish_reason": choice.get("finish_reason") or "stop"}
+                    return
+                for raw in response:
+                    if abort is not None and abort():
+                        cancelled = True
+                        break
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    fragment = line[5:].strip()
+                    if fragment == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(fragment)
+                    except ValueError:
+                        continue
+                    if isinstance(chunk.get("usage"), dict):
+                        usage = chunk["usage"]
+                    error = chunk.get("error")
+                    if isinstance(error, dict):
+                        raise EngineError(str(error.get("message") or "engine stream error"))
+                    for choice in chunk.get("choices") or []:
+                        delta = choice.get("delta") or {}
+                        piece = delta.get("content")
+                        if piece:
+                            content += piece
+                            yield {"type": "text", "text": piece}
+                        thought = delta.get("reasoning_content") or delta.get("reasoning")
+                        if thought:
+                            reasoning += thought
+                            yield {"type": "reasoning", "text": thought}
+                        for item in delta.get("tool_calls") or []:
+                            slot = calls.setdefault(item.get("index", len(calls)), {
+                                "id": "", "type": "function",
+                                "function": {"name": "", "arguments": ""}})
+                            if item.get("id"):
+                                slot["id"] = item["id"]
+                            spec = item.get("function") or {}
+                            if spec.get("name"):
+                                slot["function"]["name"] += spec["name"]
+                            if spec.get("arguments"):
+                                slot["function"]["arguments"] += spec["arguments"]
+                                yield {"type": "tool_delta", "call": slot,
+                                       "delta": spec["arguments"]}
+                        if choice.get("finish_reason"):
+                            finish = choice["finish_reason"]
+                            yield {"type": "finish", "finish_reason": finish}
+        except EngineError:
+            raise
+        except Exception as exc:
+            raise EngineError(self._redact("Engine stream failed; check engine health") +
+                              f": {type(exc).__name__}") from exc
+        if cancelled:
+            finish = "cancelled"
+        message, usage = self._result({"content": content, "reasoning_content": reasoning,
+                                       "tool_calls": [calls[key] for key in sorted(calls)]},
+                                      {"usage": usage})
+        yield {"type": "result", "message": message, "usage": usage, "finish_reason": finish,
+               "cancelled": cancelled}
+
+    @staticmethod
+    def _result(message, payload):
+        out = {"role": "assistant", "content": message.get("content") or ""}
+        thought = message.get("reasoning_content")
+        if isinstance(thought, str) and thought:
+            out["reasoning_content"] = thought
+        calls = [call for call in (message.get("tool_calls") or [])
+                 if isinstance(call, dict) and (call.get("function") or {}).get("name")]
+        if calls:
+            out["tool_calls"] = calls
+        usage = payload.get("usage") or {}
+        return out, usage
+
     def npu_health(self, timeout=2):
         try:
             return self._request("/health", timeout=timeout, npu=True)
@@ -415,7 +527,7 @@ def get_engine():
 
 def __getattr__(name):
     if name in {"is_running", "model_id", "start", "stop", "telemetry", "plan", "doctor",
-                "status", "logs", "chat", "npu_health", "ensure_npu", "embed"}:
+                "status", "logs", "chat", "chat_stream", "npu_health", "ensure_npu", "embed"}:
         return getattr(get_engine(), name)
     raise AttributeError(name)
 

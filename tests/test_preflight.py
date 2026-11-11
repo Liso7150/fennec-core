@@ -1,3 +1,5 @@
+import hermetic  # noqa: F401
+
 import json
 import tempfile
 import unittest

@@ -1,16 +1,23 @@
+import hermetic  # noqa: F401
+
+import io
 import json
 import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from fastapi.testclient import TestClient
 
 from fennec_core import loop
+from fennec_core import server as server_mod
 from fennec_core.config import ConfigError, load_config
+from fennec_core.server import main as agent_main
 from fennec_core.server import make_app, serve
 
 HEADERS = {"X-Fennec-Client": "1"}
@@ -84,6 +91,35 @@ def make_config(root: Path, web: Path | None = None):
                    cache_root=root / "cache", web_root=web or root / "missing-web")
 
 
+OUTLET_STATUS = {"jev": {"present": False, "root": None, "importable": False, "launcher": None,
+                         "policy_key": False, "paid_api": True, "note": "stubbed for tests"},
+                 "openbot": {"present": False, "url": "http://127.0.0.1:3001", "loopback": True,
+                             "agents": [], "error": "no OpenBot workspace answering"}}
+
+
+class StubOutlets:
+    """Stands in for the real outlets so no test can reach a browser or a port."""
+
+    def __init__(self, config=None):
+        self.config = config
+        self.calls = []
+        self.available_tools = set()
+
+    def status(self, refresh=False):
+        return OUTLET_STATUS
+
+    def available(self, name):
+        return name in self.available_tools
+
+    def web_task(self, goal, url="", **kwargs):
+        self.calls.append(("web_task", goal, url, kwargs))
+        return {"ok": True, "outlet": "jev-ultrafast", "steps": 1}
+
+    def coworker_task(self, goal, agent="", **kwargs):
+        self.calls.append(("coworker_task", goal, agent, kwargs))
+        return {"ok": False, "outlet": "openbot", "error": "stubbed"}
+
+
 class ClientCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -97,6 +133,14 @@ class ClientCase(unittest.TestCase):
         self.engine = FakeEngine()
         self.config = make_config(self.root, self.web)
         loop.SESSIONS.clear()
+        # The real bridge opens a socket to 127.0.0.1:3001 and scans the disk for a
+        # Jev checkout on the first turn of every session. On a machine that has
+        # either installed that is a unit test reaching the network - and offering
+        # the model a tool that spends money.
+        self.outlets_stub = StubOutlets(self.config)
+        patcher = mock.patch.object(server_mod, "Outlets", lambda *a, **kw: self.outlets_stub)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.client = TestClient(make_app(self.config, self.engine, allowed_hosts=["127.0.0.1"]),
                                  base_url="http://127.0.0.1")
 
@@ -281,6 +325,237 @@ class ChatAndAgentTests(ClientCase):
     def test_unknown_poll_is_404(self):
         self.assertEqual(self.client.get("/api/agent/poll", params={"id": "missing"},
                                          headers=HEADERS).status_code, 404)
+
+
+def sse_events(text):
+    events = []
+    for block in text.split("\n\n"):
+        for line in block.splitlines():
+            if line.startswith("data: "):
+                events.append(json.loads(line[6:]))
+    return events
+
+
+class OutletAndAgUiTests(ClientCase):
+    def setUp(self):
+        super().setUp()
+        # This file is where a Jev checkout exists on the machine under test, so
+        # the routes that depend on one declare it instead of inheriting it.
+        self.outlets_stub.available_tools.add("web_task")
+
+    def run_ag_ui(self, **overrides):
+        body = {"threadId": "t-1", "runId": "r-1", "state": {}, "tools": [], "context": [],
+                "forwardedProps": {}, "messages": [{"id": "m1", "role": "user",
+                                                    "content": "say done"}]}
+        body.update(overrides)
+        return self.client.post("/api/ag-ui", headers=HEADERS, json=body)
+
+    def test_outlet_status_is_reported_and_guarded(self):
+        self.assertEqual(self.client.get("/api/outlets").status_code, 403)
+        response = self.client.get("/api/outlets", headers=HEADERS)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), OUTLET_STATUS)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_outlet_run_drives_the_installed_jev_outlet(self):
+        response = self.client.post("/api/outlets/run", headers=HEADERS,
+                                    json={"outlet": "jev", "goal": "cart shows one item",
+                                          "url": "https://example.com", "max_steps": 3})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"ok": True, "outlet": "jev-ultrafast", "steps": 1})
+        self.assertEqual(self.outlets_stub.calls,
+                         [("web_task", "cart shows one item", "https://example.com",
+                           {"max_steps": 3})])
+
+    def test_outlet_run_refuses_an_absent_outlet_and_names_the_fix(self):
+        response = self.client.post("/api/outlets/run", headers=HEADERS,
+                                    json={"outlet": "openbot", "goal": "ask the researcher"})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("fennec outlets", response.json()["detail"])
+        self.assertEqual(self.outlets_stub.calls, [])
+
+    def test_outlet_run_takes_the_coworker_path_when_a_workspace_answers(self):
+        self.outlets_stub.available_tools.add("coworker_task")
+        response = self.client.post("/api/outlets/run", headers=HEADERS,
+                                    json={"outlet": "openbot", "goal": "summarise the changelog",
+                                          "agent": "researcher"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.outlets_stub.calls,
+                         [("coworker_task", "summarise the changelog", "researcher", {})])
+
+    def test_outlet_run_validates_the_outlet_name_and_goal(self):
+        unknown = self.client.post("/api/outlets/run", headers=HEADERS,
+                                   json={"outlet": "browser", "goal": "x"})
+        empty = self.client.post("/api/outlets/run", headers=HEADERS,
+                                 json={"outlet": "jev", "goal": ""})
+        self.assertEqual(unknown.status_code, 422)
+        self.assertIn("jev", unknown.json()["detail"])
+        self.assertEqual(empty.status_code, 422)
+        self.assertEqual(self.client.post("/api/outlets/run",
+                                          json={"outlet": "jev", "goal": "x"}).status_code, 403)
+
+    def test_agent_sessions_are_handed_the_outlet_bridge(self):
+        started = self.client.post("/api/agent/start", headers=HEADERS,
+                                   json={"task": "open a page", "allow_web": True,
+                                         "max_steps": 2}).json()
+        ctx = loop.SESSIONS[started["id"]]["ctx"]
+        self.assertIs(ctx.outlets, self.outlets_stub)
+        self.assertTrue(ctx.allow_web)
+        self.assertFalse(ctx.allow_shell)
+
+    def test_ag_ui_run_streams_the_documented_event_names(self):
+        response = self.run_ag_ui()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/event-stream", response.headers["content-type"])
+        events = sse_events(response.text)
+        self.assertEqual(events[0], {"type": "RUN_STARTED", "threadId": "t-1", "runId": "r-1"})
+        self.assertEqual(events[-1]["type"], "RUN_FINISHED")
+        self.assertEqual(events[-1]["result"]["stopReason"], "end_turn")
+        self.assertEqual(events[-1]["result"]["usage"]["total_tokens"], 3)
+        self.assertGreater(events[-1]["result"]["usage"]["context_chars_after"], 0)
+        deltas = [event["delta"] for event in events
+                  if event["type"] == "TEXT_MESSAGE_CONTENT"]
+        self.assertEqual(deltas, ["done"])
+        self.assertEqual([event["role"] for event in events
+                          if event["type"] == "TEXT_MESSAGE_START"], ["assistant"])
+        self.assertEqual(len([event for event in events if event["type"] == "TEXT_MESSAGE_END"]),
+                         len([event for event in events if event["type"] == "TEXT_MESSAGE_START"]))
+
+    def test_ag_ui_reports_tool_calls_and_their_results(self):
+        self.engine.reply = {"role": "assistant", "content": "looking", "tool_calls": [
+            {"id": "call-1", "type": "function",
+             "function": {"name": "list_dir", "arguments": "{}"}}]}
+        events = sse_events(self.run_ag_ui(forwardedProps={"max_steps": 1}).text)
+        types = [event["type"] for event in events]
+        self.assertIn("TOOL_CALL_START", types)
+        self.assertIn("TOOL_CALL_RESULT", types)
+        start = next(event for event in events if event["type"] == "TOOL_CALL_START")
+        self.assertEqual(start["toolCallName"], "list_dir")
+        self.assertEqual(start["toolCallId"], "call-1")
+        args = next(event for event in events if event["type"] == "TOOL_CALL_ARGS")
+        self.assertEqual(args["toolCallId"], start["toolCallId"])
+        self.assertEqual(json.loads(args["delta"]), {})
+        self.assertEqual([event["type"] for event in events].count("TOOL_CALL_END"), 1)
+        result = next(event for event in events if event["type"] == "TOOL_CALL_RESULT")
+        self.assertEqual(result["toolCallId"], "call-1")
+        self.assertTrue(json.loads(result["content"])["ok"])
+        self.assertEqual(events[-1]["result"]["stopReason"], "max_turn_requests")
+
+    def test_ag_ui_reasoning_becomes_reasoning_events(self):
+        self.engine.reply = {"role": "assistant", "content": "", "reasoning_content": "thinking"}
+        types = [event["type"] for event in sse_events(self.run_ag_ui().text)]
+        self.assertIn("REASONING_MESSAGE_CONTENT", types)
+        self.assertNotIn("THINKING_TEXT_MESSAGE_CONTENT", types)
+
+    def test_ag_ui_rejects_a_run_it_cannot_start(self):
+        self.assertEqual(self.client.post("/api/ag-ui", json={
+            "messages": [{"role": "user", "content": "hi"}]}).status_code, 403)
+        self.assertEqual(self.run_ag_ui(messages=[]).status_code, 400)
+        self.assertEqual(self.run_ag_ui(messages=[{"role": "assistant", "content": "hi"}])
+                         .status_code, 400)
+        self.assertEqual(self.run_ag_ui(messages=[{"role": "user", "content": "   "}])
+                         .status_code, 400)
+        self.assertEqual(self.run_ag_ui(forwardedProps={"workspace": str(self.root.parent)})
+                         .status_code, 403)
+        self.engine.running = False
+        self.assertEqual(self.run_ag_ui().status_code, 503)
+
+    def test_ag_ui_refuses_forwarded_props_it_cannot_use(self):
+        cases = [{"max_steps": "many"}, {"max_steps": 2.5}, {"max_steps": 1000},
+                 {"max_steps": 0}, {"workspace": 5}]
+        for props in cases:
+            response = self.run_ag_ui(forwardedProps=props)
+            self.assertEqual(response.status_code, 422, props)
+        # A number carried as a string is still a number of steps, and a directory
+        # that simply is not there is a 400 about the path, not about its type.
+        self.assertEqual(self.run_ag_ui(forwardedProps={"max_steps": "7"}).status_code, 200)
+        self.assertEqual(self.run_ag_ui(forwardedProps={"workspace": "no/such/here"}).status_code, 400)
+        self.assertEqual([session["status"] for session in loop.SESSIONS.values()], ["done"])
+
+    def test_an_unanswered_tool_call_is_closed_before_the_run_ends(self):
+        stream = server_mod.AgUiStream("t-1", "r-1")
+        events = stream.feed({"type": "assistant", "content": "", "tool_calls": [
+            {"call_id": "c-1", "name": "web_task", "args": {}}]})
+        self.assertEqual([event["type"] for event in events],
+                         ["TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END"])
+        closed = stream.close_tools()
+        self.assertEqual([event["type"] for event in closed], ["TOOL_CALL_RESULT"])
+        self.assertEqual(closed[0]["toolCallId"], "c-1")
+        self.assertEqual(json.loads(closed[0]["content"]), server_mod.AGUI_UNFINISHED)
+        self.assertEqual(stream.close_tools(), [])
+
+        stream = server_mod.AgUiStream("t-1", "r-1")
+        stream.feed({"type": "assistant", "content": "", "tool_calls": [
+            {"call_id": "c-1", "name": "web_task", "args": {}}]})
+        stream.feed({"type": "tool", "call_id": "c-1", "result": {"ok": True}})
+        self.assertEqual(stream.close_tools(), [])
+        self.assertEqual([event["type"] for event in stream.close_tools()], [])
+
+    def test_the_terminal_event_names_a_cancellation_as_one(self):
+        stream = server_mod.AgUiStream("t-1", "r-1")
+        finished = stream.finish({"id": "s-1", "status": "cancelled", "stop": None,
+                                  "usage": {}})[0]
+        self.assertEqual(finished["result"]["stopReason"], "cancelled")
+        stream = server_mod.AgUiStream("t-1", "r-1")
+        finished = stream.finish({"id": "s-1", "status": "finished", "usage": {}})[0]
+        self.assertEqual(finished["result"]["stopReason"], "end_turn")
+        stream = server_mod.AgUiStream("t-1", "r-1")
+        stream.feed({"type": "assistant", "content": "", "tool_calls": [
+            {"call_id": "c-9", "name": "list_dir", "args": {}}]})
+        self.assertEqual([event["type"] for event in
+                          stream.finish({"id": "s-1", "status": "cancelled", "usage": {}})],
+                         ["TOOL_CALL_RESULT", "RUN_FINISHED"])
+
+    def test_a_long_tool_result_is_cut_as_json_not_through_json(self):
+        text = "x" * (server_mod.AGUI_RESULT_CHARS * 2)
+        clipped = json.loads(server_mod._json_clip({"ok": True, "text": text}))
+        self.assertTrue(clipped["truncated"])
+        self.assertLessEqual(len(clipped["excerpt"]), server_mod.AGUI_RESULT_CHARS)
+        self.assertEqual(json.loads(server_mod._json_clip({"ok": True})), {"ok": True})
+
+    def test_a_client_that_hangs_up_ends_the_run_it_was_watching(self):
+        self.engine.gate = threading.Event()
+        self.addCleanup(self.engine.gate.set)
+        body = {"threadId": "t-9", "runId": "r-9", "messages": [{"role": "user",
+                                                                "content": "keep going"}]}
+        with self.client.stream("POST", "/api/ag-ui", headers=HEADERS, json=body) as response:
+            self.assertIn("RUN_STARTED", next(response.iter_lines()))
+            sid = next(iter(loop.SESSIONS))
+        for _ in range(60):
+            if loop.get_steps(sid)["status"] != "running":
+                break
+            time.sleep(0.05)
+        self.assertEqual(loop.get_steps(sid)["status"], "cancelled")
+
+    def test_ag_ui_cancel_surfaces_as_a_cancelled_run(self):
+        self.engine.gate = threading.Event()
+        self.addCleanup(self.engine.gate.set)
+        started = self.client.post("/api/agent/start", headers=HEADERS,
+                                   json={"task": "wait", "max_steps": 3}).json()
+        self.client.post("/api/agent/cancel", headers=HEADERS, json={"id": started["id"]})
+        for _ in range(150):
+            if loop.get_steps(started["id"])["status"] != "running":
+                break
+            threading.Event().wait(0.02)
+        self.assertEqual(loop.get_steps(started["id"])["status"], "cancelled")
+        self.engine.gate.set()
+
+    def test_agent_cli_reports_outlets_without_touching_the_network(self):
+        with mock.patch.object(server_mod, "load_config", return_value=self.config), \
+             mock.patch.object(sys, "stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(agent_main(["outlets"]), 0)
+        self.assertEqual(json.loads(out.getvalue()), OUTLET_STATUS)
+
+    def test_agent_cli_exposes_the_acp_entrypoint(self):
+        from fennec_core import acp as acp_mod
+        report = {"protocolVersion": 1, "agent": "fennec", "methods": ["initialize"]}
+        with mock.patch.object(acp_mod, "check", return_value=report), \
+             mock.patch.object(sys, "stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(agent_main(["acp", "--check"]), 0)
+        self.assertEqual(json.loads(out.getvalue()), report)
+        with mock.patch.object(acp_mod, "main", return_value=0) as main:
+            self.assertEqual(agent_main(["acp"]), 0)
+        main.assert_called_once_with([])
 
 
 class StaticTests(ClientCase):

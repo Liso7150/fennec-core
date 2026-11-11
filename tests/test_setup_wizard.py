@@ -1,3 +1,5 @@
+import hermetic  # noqa: F401
+
 import io
 import json
 import os

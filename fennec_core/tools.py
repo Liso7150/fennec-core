@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from itertools import islice
 
+from .outlets import SECRET_ENV_KEYS
+
 MAX_READ = 24000
 MAX_RESULT = 7000
 
@@ -21,8 +23,12 @@ class ToolContext:
     exec_timeout: int = 30
     allow_write: bool = False
     allow_npu: bool = False
+    allow_web: bool = False
+    require_approval: bool = False
     engine_client: object = None
     cache_root: str = ""
+    outlets: object = None
+    extra: object = None
 
 
 _DENIED = {".git", ".ssh", ".aws", ".azure", ".kube", ".gnupg", ".docker",
@@ -191,8 +197,8 @@ def grep(ctx, pattern, path="."):
 def _run_process(ctx, command, *, shell=False):
     if not ctx.allow_shell:
         raise PermissionError("process execution requires allow_shell; it is NOT sandboxed")
-    env = {key: value for key, value in os.environ.items()
-           if key not in {"FENNEC_API_KEY", "COLI_API_KEY", "FENNEC_APP_TOKEN"}}
+    # Anything the model can make us spawn is third-party code on this machine.
+    env = {key: value for key, value in os.environ.items() if key not in SECRET_ENV_KEYS}
     options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         try:
@@ -306,6 +312,24 @@ def semantic_search(ctx, query, k=8):
                         for s, c in hits[:max(1, min(k, 20))]]}
 
 
+# --- optional web-agent outlets (Jev / OpenBot) ---------------------------
+OUTLET_TOOLS = ("web_task", "coworker_task")
+
+
+def web_task(ctx, goal, url="", max_steps=12):
+    """One URL-scoped end state handed to the local Jev browser agent."""
+    if ctx.outlets is None:
+        return {"ok": False, "error": "no web outlets configured for this session"}
+    return ctx.outlets.web_task(goal, url, max_steps=int(max_steps or 12))
+
+
+def coworker_task(ctx, goal, agent=""):
+    """One task delegated to a coworker inside the local OpenBot workspace."""
+    if ctx.outlets is None:
+        return {"ok": False, "error": "no web outlets configured for this session"}
+    return ctx.outlets.coworker_task(goal, agent)
+
+
 # --- registry (everything-is-a-plugin, harness style) ---------------------
 TOOLS = {
     "list_dir": (list_dir, "List files and subdirectories in a workspace path.",
@@ -329,39 +353,98 @@ TOOLS = {
                   {"command": {"type": "string"}}, ["command"]),
     "git_status": (git_status, "git status --short of the workspace.", {}, []),
     "git_diff": (git_diff, "git diff of the workspace.", {}, []),
+    "web_task": (web_task,
+                 "Delegate one URL-scoped browsing goal to the local Jev browser agent "
+                 "(browser-use/jev-ultrafast). Describe the END state, not the clicks. Only "
+                 "available when that outlet is installed on this machine; it uses its own "
+                 "TypeSafe policy key and never reads workspace credentials.",
+                 {"goal": {"type": "string", "description": "end state to reach"},
+                  "url": {"type": "string", "description": "start page, https:// or http://"},
+                  "max_steps": {"type": "integer", "description": "snapshot budget, default 12"}},
+                 ["goal"]),
+    "coworker_task": (coworker_task,
+                      "Ask one coworker in the local OpenBot workspace (CopilotKit/OpenBot) to "
+                      "do a task with its own browser and files, and return what it reported. "
+                      "Only available when a loopback OpenBot answers.",
+                      {"goal": {"type": "string", "description": "the task, in one request"},
+                       "agent": {"type": "string", "description": "OpenBot agent id or name"}},
+                      ["goal"]),
 }
 
 
-def _permitted(name, ctx):
-    if name in {"write_file", "edit_file"}:
-        return ctx.allow_write
-    if name in {"run_python", "run_shell", "git_status", "git_diff"}:
-        return ctx.allow_shell
+def _extras(ctx):
+    """Session-scoped tools an embedder injected, e.g. MCP servers over an ACP session."""
+    return getattr(ctx, "extra", None) or {}
+
+
+def _available(name, ctx):
+    """Hard availability, as opposed to permission: no outlet, no tool."""
+    if name in _extras(ctx):
+        return True
     if name == "semantic_search":
         return ctx.allow_npu
+    if name in OUTLET_TOOLS:
+        outlets = getattr(ctx, "outlets", None)
+        return bool(outlets is not None and outlets.available(name))
     return True
 
 
-def openai_tools(ctx=None):
+# Which session flag unlocks each tool. With an approver attached these stay
+# unlocked and every gated call is confirmed instead: the user, not the flag,
+# decides — that is how ACP clients expect permission to work.
+_GATE = {"write_file": "allow_write", "edit_file": "allow_write",
+         "run_python": "allow_shell", "run_shell": "allow_shell",
+         "git_status": "allow_shell", "git_diff": "allow_shell",
+         "web_task": "allow_web", "coworker_task": "allow_web"}
+
+
+def _permitted(name, ctx):
+    if name in _extras(ctx):
+        return not ctx.require_approval and ctx.allow_shell
+    gate = _GATE.get(name)
+    if gate is None:
+        return True
+    if ctx.require_approval:
+        return False
+    return bool(getattr(ctx, gate))
+
+
+def openai_tools(ctx=None, advertise_all=False):
     ctx = ctx or ToolContext(workspace=".")
+    registry = dict(TOOLS)
+    registry.update(_extras(ctx))
     out = []
-    for name, (_, desc, props, required) in TOOLS.items():
-        if _permitted(name, ctx):
-            out.append({"type": "function", "function": {
-                "name": name, "description": desc,
-                "parameters": {"type": "object", "properties": props,
-                               "required": required, "additionalProperties": False}}})
+    for name, (_, desc, props, required) in registry.items():
+        if not _available(name, ctx):
+            continue
+        if not advertise_all and not _permitted(name, ctx):
+            continue
+        out.append({"type": "function", "function": {
+            "name": name, "description": desc,
+            "parameters": {"type": "object", "properties": props,
+                           "required": required, "additionalProperties": False}}})
     return out
 
 
-def execute(name, args, ctx):
-    if not isinstance(name, str) or name not in TOOLS:
+def execute(name, args, ctx, *, confirm=None, allowed_always=None):
+    extras = _extras(ctx)
+    external = isinstance(name, str) and name in extras
+    if not external and (not isinstance(name, str) or name not in TOOLS):
         return {"ok": False, "error": "unknown tool"}
-    if not _permitted(name, ctx):
-        return {"ok": False, "error": f"permission denied for {name}"}
+    if not _available(name, ctx):
+        return {"ok": False, "error": f"{name} is not available on this machine"}
+    if not _permitted(name, ctx) and name not in (allowed_always or ()):
+        if confirm is None:
+            return {"ok": False, "error": f"permission denied for {name}"}
+        decision = confirm(name, args if isinstance(args, dict) else {})
+        if decision not in {"allow_once", "allow_always"}:
+            return {"ok": False, "error": f"{name} was rejected by the user",
+                    "permission": decision or "rejected"}
+        if decision == "allow_always" and allowed_always is not None:
+            allowed_always.add(name)
     if not isinstance(args, dict):
         return {"ok": False, "error": "tool arguments must be an object"}
-    handler = TOOLS[name][0]
+    handler = extras[name][0] if external else TOOLS[name][0]
     try:
         result = handler(ctx, **args)
         import json

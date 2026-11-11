@@ -43,6 +43,8 @@ class Config:
     backend: str = "auto"
     ctx: int = 0
     policy: str = "quality"
+    jev_root: str = ""
+    openbot_url: str = "http://127.0.0.1:3001"
     api_key: str = field(default="", repr=False)
 
 
@@ -70,6 +72,7 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
         "cache_root": str(home / ".cache" / "fennec"),
         "model": "", "engine_url": "http://127.0.0.1:8184",
         "backend": "auto", "ctx": 0, "policy": "quality",
+        "jev_root": "", "openbot_url": "http://127.0.0.1:3001",
     }
     keys = set(values) | {"python", "web_root", "workspace"}
     values.update({k: v for k, v in data.items() if k in keys})
@@ -77,17 +80,21 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
         "FENNEC_HOME": "engine_root", "FENNEC_MODELS": "models_root",
         "FENNEC_CACHE": "cache_root", "FENNEC_PYTHON": "python",
         "FENNEC_MODEL": "model", "FENNEC_ENGINE_URL": "engine_url",
-        "FENNEC_WORKSPACE": "workspace",
+        "FENNEC_WORKSPACE": "workspace", "FENNEC_JEV_ROOT": "jev_root",
+        "FENNEC_OPENBOT_URL": "openbot_url",
     }.items():
         if variable in env:
             values[key] = env[variable]
     for key, value in values.items():
-        if key != "ctx" and (not isinstance(value, str) or (not value.strip() and key != "model")):
+        if key != "ctx" and (not isinstance(value, str)
+                             or (not value.strip() and key not in {"model", "jev_root"})):
             raise ConfigError(f"{key} must be a nonempty string")
     for key in ("engine_root", "suite_root", "models_root", "cache_root"):
         values[key] = _path(values[key], location.parent)
     values["web_root"] = _path(values.get("web_root", str(values["suite_root"] / "fennec-coding-agent" / "web")), location.parent)
     values["workspace"] = _path(values.get("workspace", str(values["suite_root"])), location.parent)
+    if values["jev_root"]:
+        values["jev_root"] = str(_path(values["jev_root"], location.parent))
     if values["model"]:
         values["model"] = str(_path(values["model"], values["models_root"]))
     executable = values.get("python")

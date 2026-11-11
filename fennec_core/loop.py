@@ -28,17 +28,57 @@ MAX_SESSIONS = 50
 SESSIONS: dict = {}
 _LOCK = threading.Lock()
 
+# ACP shows a plan while the turn runs; these phases are read back from the tool
+# calls the loop actually made, never from a model-authored list.
+_PHASE_ORDER = ("inspect", "implement", "verify", "summarise")
+_PHASE_LABEL = {"inspect": "Inspect the workspace",
+                "implement": "Implement the change",
+                "verify": "Verify by running code or an outlet",
+                "summarise": "Summarise the result"}
+_PHASES = {"list_dir": ("inspect",), "read_file": ("inspect",), "grep": ("inspect",),
+           "semantic_search": ("inspect",), "git_status": ("inspect",), "git_diff": ("inspect",),
+           "write_file": ("implement",), "edit_file": ("implement",),
+           "run_python": ("verify",), "run_shell": ("verify",),
+           "web_task": ("verify",), "coworker_task": ("verify",)}
+
+
+def plan_entries(used) -> list:
+    """Only stages that happened, plus the one that is next.
+
+    A skipped stage is left out rather than marked complete: a question that
+    needed no edit shows "Inspect ✓ / Implement →", never a false completion.
+    """
+    entries, last = [], -1
+    for index, phase in enumerate(_PHASE_ORDER):
+        if phase in used:
+            last = index
+            entries.append({"content": _PHASE_LABEL[phase], "status": "completed",
+                            "priority": "high" if phase in ("implement", "verify") else "medium"})
+    if last + 1 < len(_PHASE_ORDER):
+        phase = _PHASE_ORDER[last + 1]
+        entries.append({"content": _PHASE_LABEL[phase], "status": "in_progress",
+                        "priority": "high" if phase in ("implement", "verify") else "medium"})
+    return entries
+
+
+def _publish_plan(sink, used):
+    if sink is not None:
+        sink({"type": "plan", "entries": plan_entries(used)})
+
 
 def new_session(task: str, workspace: str, *, allow_write: bool = False,
                 allow_shell: bool = False, allow_npu: bool = False,
-                engine_client=None) -> str:
+                allow_web: bool = False, require_approval: bool = False,
+                engine_client=None, outlets=None, extra=None, system_extra: str = "") -> str:
     sid = uuid.uuid4().hex[:12]
     ctx = ToolContext(workspace=workspace, allow_write=allow_write, allow_shell=allow_shell,
-                      allow_npu=allow_npu, engine_client=engine_client)
+                      allow_npu=allow_npu, allow_web=allow_web, require_approval=require_approval,
+                      engine_client=engine_client, outlets=outlets, extra=extra)
     with _LOCK:
         _evict()
         SESSIONS[sid] = {"id": sid, "task": task, "steps": [], "status": "running",
-                         "ctx": ctx, "created": time.time(), "usage": {},
+                         "ctx": ctx, "created": time.time(), "usage": {}, "stop": None,
+                         "system_extra": system_extra, "history": [],
                          "cancel": threading.Event()}
     return sid
 
@@ -69,7 +109,14 @@ def get_steps(sid, after=0):
             return None
         return {"id": sid, "status": session["status"], "task": session["task"],
                 "steps": session["steps"][max(0, after):], "total": len(session["steps"]),
-                "usage": session["usage"]}
+                "stop": session.get("stop"), "usage": session["usage"]}
+
+
+def get_history(sid):
+    """The transcript a finished turn left behind, for the next turn to continue."""
+    with _LOCK:
+        session = SESSIONS.get(sid)
+        return list(session.get("history") or []) if session else []
 
 
 def cancel(sid) -> bool:
@@ -88,11 +135,12 @@ def cancel(sid) -> bool:
         return session["status"] == "cancelled"
 
 
-def _finish(sid, status):
+def _finish(sid, status, stop=None):
     with _LOCK:
         session = SESSIONS.get(sid)
         if session is not None and session["status"] == "running":
             session["status"] = status
+            session["stop"] = stop or ("cancelled" if status == "cancelled" else "end_turn")
 
 
 def _cancelled(sid):
@@ -101,7 +149,18 @@ def _cancelled(sid):
         return session is None or session["cancel"].is_set()
 
 
-def run_agent(sid: str, max_steps: int = 14):
+def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=False,
+              history=None):
+    """Drive one agent turn.
+
+    ``sink(event)`` receives live ``text`` / ``reasoning`` / ``plan`` events and
+    needs ``stream=True`` for token deltas. ``approve(name, args)`` returns an
+    ACP permission option (allow_once, allow_always, reject_once,
+    reject_always) and, when present, gated tools are advertised and confirmed
+    at call time instead of hidden by session flags. ``history`` is the prior
+    transcript of an ACP session; the finished transcript is stored back on the
+    session under ``history`` so the next turn continues this one.
+    """
     with _LOCK:
         session = SESSIONS.get(sid)
     if session is None:
@@ -111,20 +170,49 @@ def run_agent(sid: str, max_steps: int = 14):
     bridge = tokeneconomizer.Bridge(ctx.workspace, sid, session["task"])
     learned = bridge.start()
     system = SYSTEM + f"\n\nWorkspace: {ctx.workspace}"
+    if session.get("system_extra"):
+        system += "\n\n" + session["system_extra"]
     if learned:
         system += "\n\n" + learned
-    messages = [{"role": "system", "content": system},
-                {"role": "user", "content": session["task"]}]
-    tools = openai_tools(ctx)
+    prior = [dict(message) for message in (history or []) if isinstance(message, dict)]
+    if prior:
+        if prior[0].get("role") != "system":
+            prior.insert(0, {"role": "system", "content": system})
+        messages = prior
+        messages.append({"role": "user", "content": session["task"]})
+    else:
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": session["task"]}]
+    tools = openai_tools(ctx, advertise_all=approve is not None)
     budget = limits()
     seen: dict[str, str] = {}
+    always = set()
+    used_phases = set()
+    _publish_plan(sink, used_phases)
     try:
         for _ in range(max(1, min(max_steps, MAX_STEPS))):
             if _cancelled(sid):
                 _finish(sid, "cancelled")
                 return
             payload, context_stats = compact(messages, seen=seen, **budget)
-            msg, usage = client.chat(payload, tools=tools)
+            usage = {}
+            finish = None
+            if stream and hasattr(client, "chat_stream"):
+                msg = None
+                for event in client.chat_stream(payload, tools=tools, abort=lambda: _cancelled(sid)):
+                    if event["type"] == "result":
+                        msg, usage = event["message"], event["usage"]
+                        finish = event.get("finish_reason")
+                        if event.get("cancelled") or finish == "cancelled":
+                            _emit(sid, {"type": "partial", "content": (msg or {}).get("content", "")})
+                            _finish(sid, "cancelled")
+                            return
+                    elif sink is not None and event["type"] in ("text", "reasoning"):
+                        sink({"type": event["type"], "text": event["text"]})
+                if msg is None:
+                    raise engine.EngineError("engine stream produced no result")
+            else:
+                msg, usage = client.chat(payload, tools=tools)
             if _cancelled(sid):
                 _finish(sid, "cancelled")
                 return
@@ -137,6 +225,9 @@ def run_agent(sid: str, max_steps: int = 14):
                     for key in ("chars_before", "chars_after", "elided", "deduped"):
                         current["usage"]["context_" + key] = (current["usage"].get("context_" + key, 0)
                                                               + context_stats[key])
+            if sink is not None:
+                sink({"type": "usage", "usage": dict(usage or {}),
+                      "context_chars": context_stats["chars_after"]})
             assistant = {"role": "assistant", "content": msg.get("content") or ""}
             reasoning = msg.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning:
@@ -145,25 +236,59 @@ def run_agent(sid: str, max_steps: int = 14):
             if tool_calls:
                 assistant["tool_calls"] = tool_calls
             messages.append(assistant)
-            calls = [{"name": tc.get("function", {}).get("name"), "args": _args(tc)}
+            calls = [{"name": tc.get("function", {}).get("name"), "args": _args(tc),
+                      "call_id": tc.get("id") or tc.get("function", {}).get("name")}
                      for tc in tool_calls]
             bridge.assistant(assistant["content"], [
                 (tc.get("id", call["name"]), call["name"], call["args"])
                 for tc, call in zip(tool_calls, calls)], usage)
             _emit(sid, {"type": "assistant", "content": assistant["content"],
                         "reasoning": reasoning or "", "tool_calls": calls})
-            if not tool_calls:
+            if sink is not None and not stream:
+                if reasoning:
+                    sink({"type": "reasoning", "text": reasoning})
+                if assistant["content"]:
+                    sink({"type": "text", "text": assistant["content"]})
+            if finish == "length":
+                # Truncated output: partial text stays in the transcript, a cut-off
+                # tool call is never executed.
                 _emit(sid, {"type": "final", "content": assistant["content"]})
-                _finish(sid, "done")
+                _finish(sid, "done", "max_tokens")
+                return
+            if not tool_calls:
+                used_phases.add("summarise")
+                _publish_plan(sink, used_phases)
+                _emit(sid, {"type": "final", "content": assistant["content"]})
+                _finish(sid, "done", "end_turn")
                 return
             notes = []
             for tc, call in zip(tool_calls, calls):
                 if _cancelled(sid):
                     _finish(sid, "cancelled")
                     return
-                result = execute(call["name"], call["args"], ctx)
+                call_id = tc.get("id", call["name"])
+                _emit(sid, {"type": "tool_start", "name": call["name"], "args": call["args"],
+                            "call_id": call_id})
+                if sink is not None:
+                    sink({"type": "tool_start", "name": call["name"], "args": call["args"],
+                          "call_id": call_id})
+                confirm = None
+                if approve is not None:
+                    def confirm(name, args, _allowed=always):
+                        decision = approve(name, args)
+                        if decision == "allow_always":
+                            _allowed.add(name)
+                        return decision
+                result = execute(call["name"], call["args"], ctx, confirm=confirm,
+                                 allowed_always=always)
                 _emit(sid, {"type": "tool", "name": call["name"], "args": call["args"],
-                            "result": result, "ok": result.get("ok", False)})
+                            "result": result, "ok": result.get("ok", False),
+                            "call_id": call_id})
+                if sink is not None:
+                    sink({"type": "tool_end", "name": call["name"], "args": call["args"],
+                          "result": result, "ok": result.get("ok", False), "call_id": call_id})
+                used_phases.update(_PHASES.get(call["name"], ()))
+                _publish_plan(sink, used_phases)
                 rendered = json.dumps(result, ensure_ascii=False)
                 bridge.tool_result(tc.get("id", call["name"]), rendered,
                                    bool(result.get("ok", False)))
@@ -176,12 +301,16 @@ def run_agent(sid: str, max_steps: int = 14):
             if notes:
                 messages.append({"role": "user", "content": "\n\n".join(notes)})
         _emit(sid, {"type": "final", "content": "(reached the step limit without a final answer)"})
-        _finish(sid, "done")
+        _finish(sid, "done", "max_turn_requests")
     except Exception as exc:
         _emit(sid, {"type": "error", "content": repr(exc)})
         _finish(sid, "error")
     finally:
         bridge.end()
+        with _LOCK:
+            current = SESSIONS.get(sid)
+            if current is not None:
+                current["history"] = messages
 
 
 def _args(tc):
