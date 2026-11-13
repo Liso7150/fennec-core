@@ -184,7 +184,8 @@ fn handle_conn(mut stream: TcpStream, dist: PathBuf, clients: Clients) {
     if let Some(cmd) = route.strip_prefix("/api/") {
         if method != "POST" { send_json(&mut stream, "405 Method Not Allowed", &serde_json::json!("POST required")); return; }
         let args: serde_json::Value = if body.is_empty() { serde_json::json!({}) } else { serde_json::from_slice(&body).unwrap_or(serde_json::json!({})) };
-        match handle_api(cmd, &args, &clients) {
+        let cmd = cmd.replace('/', "_");
+        match handle_api(&cmd, &args, &clients) {
             Ok(v) => send_json(&mut stream, "200 OK", &v),
             Err(e) => send_json(&mut stream, "500 Internal Server Error", &serde_json::json!(e)),
         }
