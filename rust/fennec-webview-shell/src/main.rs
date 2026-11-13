@@ -44,13 +44,13 @@ fn main() {
     let window = WindowBuilder::new().with_title("Fennec WebView2 IPC").build(&event_loop).unwrap();
     let (tx, rx) = mpsc::channel::<String>();
     let ipc_proxy = proxy.clone();
-    let webview = WebViewBuilder::new(&window)
+    let webview = WebViewBuilder::new()
         .with_html(BENCH_HTML)
         .with_ipc_handler(move |req| {
             let body = req.body().clone();
             let _ = tx.send(body);
         })
-        .build()
+        .build(&window)
         .unwrap();
 
     // Drain IPC on a background thread; dispatch stream/eval via the event loop.

@@ -7,11 +7,7 @@ repository.workspace = true
 description = "The token-stream winner: Rust agent backend + system WebView2 over native IPC (no bundled browser, no SSE). Counterpart to the Chromium+SSE shell for the transport A/B."
 
 [dependencies]
-serde = { workspace = true }
 serde_json = { workspace = true }
-fennec-economy = { workspace = true }
-fennec-outlets = { workspace = true }
-fennec-acp = { workspace = true }
 wry = "0.57"
 tao = "0.37"
 
