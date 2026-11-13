@@ -3,7 +3,7 @@
 //! (config, models, engine lifecycle, context economy, outlets, ACP agent loop)
 //! backed by the fennec-* Rust crates, then drives a bundled Chromium in app
 //! mode. No Electron, no Node: the agent logic is Rust end to end.
-use fennec_desktop_shell::{config, engine};
+use fennec_desktop_shell::{config, engine, parity};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -59,6 +59,7 @@ fn content_type(path: &std::path::Path) -> &'static str {
 }
 
 fn handle_api(cmd: &str, args: &serde_json::Value, clients: &Clients) -> Result<serde_json::Value, String> {
+    if let Some(r) = parity::dispatch(cmd, args) { return r; }
     match cmd {
         "stream_emit" => {
             let n = args.get("count").and_then(|c| c.as_u64()).unwrap_or(2000) as usize;

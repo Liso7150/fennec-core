@@ -2,3 +2,4 @@
 //! renderer and driving a bundled Chromium. Replaces fennec-desktop/electron/*.js.
 pub mod config;
 pub mod engine;
+pub mod parity;
