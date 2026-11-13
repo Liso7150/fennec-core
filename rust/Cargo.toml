@@ -8,7 +8,6 @@ members = [
     "fennec-outlets",
     "fennec-preflight",
     "fennec-pyjson",
-    "fennec-rs",
     "fennec-webview-shell",
 ]
 

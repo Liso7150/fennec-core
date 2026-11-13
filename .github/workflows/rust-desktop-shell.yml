@@ -33,7 +33,7 @@ jobs:
           $p = Start-Process -FilePath $exe -ArgumentList "--no-browser","--dist",$dist `
                -RedirectStandardError shell.err -PassThru -WindowStyle Hidden
           Start-Sleep -Milliseconds 1500
-          $url = ((Get-Content shell.err | Select-Object -First 1) -replace '.*listening on ','').Trim()
+          $url = ((Get-Content shell.err | Select-Object -First 1) -replace '.*listening on ','').Trim().TrimEnd('/')
           if (-not $url) { Stop-Process -Id $p.Id -Force; throw "shell did not start" }
           $cfg = Invoke-RestMethod -Method Post -Uri "$url/api/config" -Body '{}' -ContentType 'application/json'
           if ($cfg.backend -ne 'auto') { throw "config backend mismatch" }
