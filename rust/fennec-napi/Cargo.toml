@@ -1,0 +1,16 @@
+[package]
+name = "fennec-napi"
+description = "Node-API binding for the context economy, loadable by Bun and Electron's Node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fennec-economy = { path = "../fennec-economy" }
+fennec-pyjson = { path = "../fennec-pyjson" }
+serde_json.workspace = true
+libloading = "0.8"
