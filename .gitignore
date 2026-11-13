@@ -9,4 +9,4 @@ release/
 .DS_Store
 *.egg-info/
 .pytest_cache/
-rust/target/
+src/target/

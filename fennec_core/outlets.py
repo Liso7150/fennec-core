@@ -101,7 +101,7 @@ def redact(text: str, environ=None) -> str:
     """Fennec's own credentials, then any bearer token.
 
     The Rust port does the identical work - `fennec-rs redact` and the golden in
-    `rust/goldens/redact.jsonl` pin it - and is faster at the batch, but every
+    `src/goldens/redact.jsonl` pin it - and is faster at the batch, but every
     size measured costs more through the pipe than here, so the live path stays
     in-process. See `fennec_core.rust_bridge` for the numbers.
     """

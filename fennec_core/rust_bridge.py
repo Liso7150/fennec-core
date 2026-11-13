@@ -51,7 +51,9 @@ def candidate_paths():
         yield Path(hint)
         return
     for name in _BINARY_NAMES:
-        yield HERE.parent / "rust" / "target" / "release" / name
+        # The binary is a member of the fennec-cli workspace; the crates it links
+        # live under fennec-core/src.
+        yield ROOT / "fennec-cli" / "target" / "release" / name
     found = shutil.which("fennec-rs")
     if found:
         yield Path(found)

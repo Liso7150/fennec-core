@@ -1,7 +1,7 @@
 //! Address literals, exactly as CPython's `ipaddress` accepts and classifies
 //! them. The outlet URL gate is a security boundary, so the accept/reject rules
 //! and every predicate are ported from the stdlib source rather than from a
-//! summary: `rust/goldens/ip-parse.jsonl` and `ip-classify.jsonl` are generated
+//! summary: `src/goldens/ip-parse.jsonl` and `ip-classify.jsonl` are generated
 //! by CPython itself and the test suite fails on any disagreement.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

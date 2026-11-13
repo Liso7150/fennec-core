@@ -1,6 +1,6 @@
 """The Rust port has to be indistinguishable from the Python it replaces.
 
-`rust/goldens/` pins the ported logic against CPython byte for byte; this is the
+`src/goldens/` pins the ported logic against CPython byte for byte; this is the
 other half - the live pipe. It compacts a transcript through both paths, walks
 several steps over one shared `seen` map, and redacts a payload that carries a
 credential, so a wrong order, a stale environment or a dropped key shows up here

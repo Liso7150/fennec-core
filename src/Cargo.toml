@@ -2,12 +2,11 @@
 resolver = "2"
 members = [
     "fennec-acp",
+    "fennec-client",
     "fennec-economy",
-    "fennec-napi",
     "fennec-outlets",
     "fennec-preflight",
     "fennec-pyjson",
-    "fennec-webview-shell",
 ]
 
 [workspace.package]
@@ -22,6 +21,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 
 fennec-acp = { path = "fennec-acp" }
+fennec-client = { path = "fennec-client" }
 fennec-economy = { path = "fennec-economy" }
 fennec-outlets = { path = "fennec-outlets" }
 fennec-preflight = { path = "fennec-preflight" }

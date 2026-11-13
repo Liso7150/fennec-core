@@ -4,7 +4,7 @@
 //!
 //! The two device probes Python makes through third-party helpers (`psutil` for
 //! free RAM, `nvidia-smi` for VRAM) stay injectable: `plan` takes them, so the
-//! math is what gets tested, and `rust/goldens/preflight-matrix.jsonl` pins it.
+//! math is what gets tested, and `src/goldens/preflight-matrix.jsonl` pins it.
 
 use serde_json::{Map, Number, Value};
 use std::path::{Path, PathBuf};

@@ -1,5 +1,5 @@
 //! Every `json.dumps(value, ensure_ascii=False)` shape Python produced, checked
-//! string-for-string (`rust/goldens/pyjson.jsonl`, from
+//! string-for-string (`src/goldens/pyjson.jsonl`, from
 //! `benchmarks/make_goldens.py`).
 
 use fennec_pyjson::{char_len, dumps, float_repr};

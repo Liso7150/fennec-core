@@ -4,7 +4,7 @@
 //! in Python - those are I/O, not math, and the suite never starts either peer
 //! from a test.
 //!
-//! `rust/goldens/` holds CPython's own output for 2 000 transcript lines, every
+//! `src/goldens/` holds CPython's own output for 2 000 transcript lines, every
 //! reserved-address sample and 2 000 URLs; the tests fail on any drift.
 
 pub mod ip;

@@ -1,5 +1,5 @@
 //! Byte-for-byte agreement with `fennec_core/context.py`, against the goldens in
-//! `rust/goldens/` (produced by `benchmarks/make_goldens.py`).
+//! `src/goldens/` (produced by `benchmarks/make_goldens.py`).
 
 use fennec_economy::{compact, elide, size, Options, Stats};
 use serde_json::Value;
