@@ -385,7 +385,7 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
     def engine_or_503():
         try:
             if not client.is_running():
-                raise HTTPException(503, "Colibri engine is not running")
+                raise HTTPException(503, "Fennec engine is not running")
         except EngineError as exc:
             raise HTTPException(503, str(exc)) from exc
         return client
