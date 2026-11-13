@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "fennec-acp",
-    "fennec-desktop-shell",
     "fennec-economy",
     "fennec-napi",
     "fennec-outlets",
