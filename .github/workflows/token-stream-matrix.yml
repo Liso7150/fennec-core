@@ -3,16 +3,22 @@ name: Token-stream matrix (SSE vs WebView2 IPC)
 # The token-stream winner A/B on a SAC-free runner: the Rust desktop shell over
 # SSE-loopback (Chromium-style) vs the Rust WebView2 shell over native IPC.
 # Local dev boxes block new unsigned binaries (SAC os error 4551), so this runs
-# on GitHub windows-latest. Do not ship from here; measurement only.
+# on GitHub windows-latest. Measurement only; do not ship.
 on:
   push:
-    paths: ["rust/**", "tools/sse_stream_bench.py", ".github/workflows/token-stream-matrix.yml"]
+    paths:
+      - "rust/**"
+      - "tools/sse_stream_bench.py"
+      - "tools/token_stream_winner.py"
+      - ".github/workflows/token-stream-matrix.yml"
   workflow_dispatch:
 
 jobs:
   token-stream:
     runs-on: windows-latest
-    defaults: { run: { working-directory: rust } }
+    defaults:
+      run:
+        working-directory: rust
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -21,9 +27,7 @@ jobs:
       - name: SSE cell (desktop shell, browser-free client)
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath target/release/fennec-desktop-shell.exe `
-               -ArgumentList '--no-browser','--dist','fennec-desktop-shell/tests/fixtures/dist' `
-               -RedirectStandardError sse.err -PassThru -WindowStyle Hidden
+          $p = Start-Process -FilePath target/release/fennec-desktop-shell.exe -ArgumentList '--no-browser','--dist','fennec-desktop-shell/tests/fixtures/dist' -RedirectStandardError sse.err -PassThru -WindowStyle Hidden
           Start-Sleep -Milliseconds 1500
           $url = ((Get-Content sse.err | Select-Object -First 1) -replace '.*listening on ','').Trim()
           python ../tools/sse_stream_bench.py $url 2000 | Tee-Object -FilePath ../sse-row.json
@@ -38,17 +42,10 @@ jobs:
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
       - name: Name the winner
         shell: pwsh
-        run: |
-          python -c "import json,os;
-          sse=json.load(open('../sse-row.json'));
-          ipc=None
-          if os.path.exists('../ipc-row.jsonl'):
-              rows=[json.loads(l) for l in open('../ipc-row.jsonl') if l.strip()];
-              ipc=[r for r in rows if r['backend']=='stream-delivered']
-              ipc=ipc[0] if ipc else None
-          print('SSE  delivered_ms=',sse['elapsed_ms'],'per_token=',sse['per_token_ms'])
-          if ipc: print('IPC  delivered_ms=',ipc['elapsed_ms'],'per_token=',round(ipc['elapsed_ms']/ipc['messages'],4))
-          if ipc: print('WINNER=', 'IPC (WebView2)' if ipc['elapsed_ms']<sse['elapsed_ms'] else 'SSE (Chromium)')
-          else: print('IPC cell did not run on this runner; SSE only')"
+        run: python ../tools/token_stream_winner.py ../sse-row.json ../ipc-row.jsonl
       - uses: actions/upload-artifact@v4
-        with: { name: token-stream-rows, path: ["sse-row.json", "ipc-row.jsonl"] }
+        with:
+          name: token-stream-rows
+          path: |
+            sse-row.json
+            ipc-row.jsonl
