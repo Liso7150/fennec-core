@@ -10,6 +10,6 @@ pub mod git;
 pub mod http;
 pub mod suite;
 
-pub use agent::Core;
+pub use agent::{Core, Outlet, Outlets, OUTLET_RUN_TIMEOUT};
 pub use engine::{ChatDelta, Engine};
 pub use suite::{Repo, Suite};
