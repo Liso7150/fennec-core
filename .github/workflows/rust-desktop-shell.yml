@@ -1,0 +1,48 @@
+name: Rust desktop shell
+
+# Smart App Control on the dev box blocks executing newly-built unsigned Rust
+# binaries, so the runnable verification lives here on a SAC-free runner.
+on:
+  push:
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust-desktop-shell.yml"
+  pull_request:
+    paths:
+      - "rust/**"
+  workflow_dispatch:
+
+jobs:
+  test-and-smoke:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Unit + parity tests (config, engine, economy, outlets, acp)
+        run: cargo test -p fennec-desktop-shell -p fennec-economy -p fennec-outlets -p fennec-acp
+      - name: Build the desktop shell
+        run: cargo build -p fennec-desktop-shell --release
+      - name: Headless shell smoke (config / compaction / outlets)
+        shell: pwsh
+        run: |
+          $exe = "target/release/fennec-desktop-shell.exe"
+          $dist = "fennec-desktop-shell/tests/fixtures/dist"
+          $p = Start-Process -FilePath $exe -ArgumentList "--no-browser","--dist",$dist `
+               -RedirectStandardError shell.err -PassThru -WindowStyle Hidden
+          Start-Sleep -Milliseconds 1500
+          $url = ((Get-Content shell.err | Select-Object -First 1) -replace '.*listening on ','').Trim()
+          if (-not $url) { Stop-Process -Id $p.Id -Force; throw "shell did not start" }
+          $cfg = Invoke-RestMethod -Method Post -Uri "$url/api/config" -Body '{}' -ContentType 'application/json'
+          if ($cfg.backend -ne 'auto') { throw "config backend mismatch" }
+          $dup = 'x' * 9000
+          $body = @{ messages = @( @{ role='tool'; content=$dup }, @{ role='tool'; content=$dup } ) } | ConvertTo-Json -Depth 5
+          $c = Invoke-RestMethod -Method Post -Uri "$url/api/context/compact" -Body $body -ContentType 'application/json'
+          if ($c.stats.deduped -lt 1) { throw "compaction did not dedupe" }
+          if ($c.stats.chars_after -ge $c.stats.chars_before) { throw "compaction did not shrink" }
+          $o = Invoke-RestMethod -Method Post -Uri "$url/api/outlets/status" -Body '{"origins":["http://127.0.0.1:8184"]}' -ContentType 'application/json'
+          if (-not $o[0].loopback) { throw "outlets loopback gate wrong" }
+          Write-Output "smoke ok: backend=$($cfg.backend) before=$($c.stats.chars_before) after=$($c.stats.chars_after) deduped=$($c.stats.deduped)"
+          Stop-Process -Id $p.Id -Force

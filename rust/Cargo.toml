@@ -2,15 +2,18 @@
 resolver = "2"
 members = [
     "fennec-acp",
+    "fennec-desktop-shell",
     "fennec-economy",
+    "fennec-napi",
     "fennec-outlets",
     "fennec-preflight",
     "fennec-pyjson",
     "fennec-rs",
+    "fennec-webview-shell",
 ]
 
 [workspace.package]
-version = "2.0.0"
+version = "2.5.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/Liso7150/fennec-core"
