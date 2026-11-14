@@ -13,17 +13,37 @@ fn golden(name: &str) -> String {
         .unwrap_or_else(|error| panic!("{} is missing - run benchmarks/make_goldens.py: {error}", path.display()))
 }
 
-fn model_dir() -> String {
-    // .. -> rust, .. -> fennec-core, .. -> the repo root that holds benchmarks/.
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
+/// The goldens were recorded against a synthetic checkpoint: the committed
+/// `config.json` plus a 32 MiB `weights.bin`, totalling the 33 554 548 bytes the
+/// golden reports. The third `..` here used to land on the harness checkout that
+/// held that directory, which only exists on the machine `make_goldens.py` ran
+/// on; the fixture is rebuilt in a temp dir instead, so the report cannot depend
+/// on this machine's disk. Each test gets its own copy: the suite runs tests in
+/// threads, and two of them sharing one directory would read a half-written file.
+fn model_dir(tag: &str) -> String {
+    const WEIGHTS_BYTES: u64 = 33_554_432;
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("benchmarks")
         .join("workloads")
-        .join("model")
-        .to_string_lossy()
-        .into_owned()
+        .join("model");
+    let dir = std::env::temp_dir().join(format!("fennec-preflight-golden-{tag}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("config.json");
+    let source = fixture.join("config.json");
+    let want = std::fs::metadata(&source)
+        .unwrap_or_else(|error| panic!("{source:?} is missing: {error}"))
+        .len();
+    if std::fs::metadata(&config).map(|meta| meta.len()).unwrap_or(0) != want {
+        std::fs::copy(&source, &config).unwrap();
+    }
+    let weights = dir.join("weights.bin");
+    if std::fs::metadata(&weights).map(|meta| meta.len()).unwrap_or(0) != WEIGHTS_BYTES {
+        let file = std::fs::File::create(&weights).unwrap();
+        file.set_len(WEIGHTS_BYTES).unwrap();
+    }
+    dir.to_string_lossy().into_owned()
 }
 
 fn without<'a>(report: &'a Value, keys: &[&str]) -> Value {
@@ -41,7 +61,7 @@ fn without<'a>(report: &'a Value, keys: &[&str]) -> Value {
 #[test]
 fn kv_growth_matches_the_config_python_read() {
     let want: Value = serde_json::from_str(&golden("kv-per-token.json")).unwrap();
-    let got = kv_bytes_per_token(std::path::Path::new(&model_dir()));
+    let got = kv_bytes_per_token(std::path::Path::new(&model_dir("kv")));
     assert_eq!(Value::from(got), want["kv_bytes_per_token"]);
 }
 
@@ -57,7 +77,7 @@ fn every_probe_combination_produces_the_same_report() {
         let probe = &case["probe"];
         let ctx = case["report"]["ctx"].as_i64().unwrap();
         let got = plan_with(
-            &model_dir(),
+            &model_dir("matrix"),
             ctx,
             None,
             probe["vram_bytes"].as_i64(),
@@ -79,7 +99,7 @@ fn every_probe_combination_produces_the_same_report() {
 #[test]
 fn an_unreadable_config_is_unknown_geometry_not_a_crash() {
     let missing = plan(
-        &std::path::Path::new(&model_dir()).join("nope").to_string_lossy(),
+        &std::path::Path::new(&model_dir("unreadable")).join("nope").to_string_lossy(),
         4096,
         None,
         Some(0),
@@ -100,7 +120,7 @@ fn a_caller_supplied_kv_size_skips_the_config_read() {
         let case: Value = serde_json::from_str(line).unwrap();
         let probe = &case["case"];
         let got = plan_with(
-            &model_dir(),
+            &model_dir("injected"),
             probe["ctx"].as_i64().unwrap(),
             probe["kv_bytes"].as_i64(),
             probe["vram"].as_i64(),
