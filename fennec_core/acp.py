@@ -33,6 +33,7 @@ from . import engine, loop
 from . import mcp as mcp_bridge
 from . import outlets as outlets_bridge
 from .context import limits
+from .tools import approval_context
 
 PROTOCOL_VERSION = 1
 
@@ -785,7 +786,7 @@ class Agent:
             call_id = (current or {}).get("call_id") or f"permission-{uuid.uuid4().hex[:8]}"
             args = args if isinstance(args, dict) else {}
             tool_call = {"toolCallId": call_id, "title": _title(name, args), "kind": _kind(name),
-                         "status": "pending", "rawInput": _clip(args)}
+                         "status": "pending", "rawInput": _clip(args), **approval_context(name)}
             locations = _locations(session, name, args)
             if locations:
                 tool_call["locations"] = locations

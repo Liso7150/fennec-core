@@ -592,6 +592,8 @@ class TurnTests(AcpCase):
                 self.assertEqual(request["sessionId"], session_id)
                 self.assertEqual(request["toolCall"]["kind"], "edit")
                 self.assertEqual(request["toolCall"]["status"], "pending")
+                self.assertEqual(request["toolCall"]["risk"], "medium")
+                self.assertIn("workspace", request["toolCall"]["reason"])
                 self.assertEqual({option["kind"] for option in request["options"]},
                                  {"allow_once", "allow_always", "reject_once", "reject_always"})
                 update = [item for item in client.updates(session_id, "tool_call_update", timeout=0)

@@ -8,6 +8,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from itertools import islice
+from typing import NamedTuple
 
 from .outlets import SECRET_ENV_KEYS
 
@@ -389,24 +390,55 @@ def _available(name, ctx):
     return True
 
 
-# Which session flag unlocks each tool. With an approver attached these stay
-# unlocked and every gated call is confirmed instead: the user, not the flag,
-# decides — that is how ACP clients expect permission to work.
-_GATE = {"write_file": "allow_write", "edit_file": "allow_write",
-         "run_python": "allow_shell", "run_shell": "allow_shell",
-         "git_status": "allow_shell", "git_diff": "allow_shell",
-         "web_task": "allow_web", "coworker_task": "allow_web"}
+# Which session flag unlocks each gated tool when no approver is attached, how
+# much damage the call can do, and why it is gated at all. Every approval a
+# client shows — ACP, the desktop, the PWA, the IDE — is built from this table,
+# so a gated tool is described once instead of in four places.
+class Gate(NamedTuple):
+    flag: str
+    risk: str
+    reason: str
+
+
+GATES = {
+    "write_file": Gate("allow_write", "medium", "replaces a file in the workspace"),
+    "edit_file": Gate("allow_write", "medium", "edits a file in the workspace"),
+    "run_python": Gate("allow_shell", "high", "runs code on this machine, unsandboxed"),
+    "run_shell": Gate("allow_shell", "high", "runs a command on this machine, unsandboxed"),
+    "git_status": Gate("allow_shell", "low", "asks git to read the repository"),
+    "git_diff": Gate("allow_shell", "low", "asks git to read the repository"),
+    "web_task": Gate("allow_web", "high",
+                     "hands the goal to the Jev browser outlet, which then visits the web"),
+    "coworker_task": Gate("allow_web", "high",
+                          "hands the goal to an OpenBot coworker, with its own files and browser"),
+}
+
+
+def approval_context(name):
+    """What an approval card must say about one tool call.
+
+    In the normal flow this is reached only for a name the gate table does not
+    hold: an MCP or outlet extra, or one of the suite's own tools that needs no
+    flag because nothing it does is protected. Neither case is described here,
+    so the risk stays unknown instead of guessing — and the reason says what is
+    actually known, which is that no gate covers this call.
+    """
+    gate = GATES.get(name)
+    if gate is None:
+        return {"risk": "unknown",
+                "reason": f"nothing in the suite gates {name}, so its effects are not described here"}
+    return {"risk": gate.risk, "reason": gate.reason}
 
 
 def _permitted(name, ctx):
     if name in _extras(ctx):
         return not ctx.require_approval and ctx.allow_shell
-    gate = _GATE.get(name)
+    gate = GATES.get(name)
     if gate is None:
         return True
     if ctx.require_approval:
         return False
-    return bool(getattr(ctx, gate))
+    return bool(getattr(ctx, gate.flag))
 
 
 def openai_tools(ctx=None, advertise_all=False):

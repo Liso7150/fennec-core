@@ -811,5 +811,202 @@ class EngineBinaryTests(unittest.TestCase):
         self.assertIn("python", command[0].lower())
 
 
+class _Scripted(FakeEngine):
+    """FakeEngine that answers each turn from a list, like the ACP tests' ScriptEngine."""
+
+    def __init__(self, replies):
+        super().__init__()
+        self.replies = list(replies)
+
+    def chat(self, messages, **kwargs):
+        self.calls.append({"messages": list(messages)})
+        reply = self.replies.pop(0) if self.replies else {"role": "assistant", "content": "done"}
+        return reply, {"total_tokens": 3}
+
+
+def _call(name, args, call_id="call-1"):
+    return {"role": "assistant", "content": "", "tool_calls": [
+        {"id": call_id, "type": "function",
+         "function": {"name": name, "arguments": json.dumps(args)}}]}
+
+
+class ApprovalTests(ClientCase):
+    """Per-call approvals on the polling path — the question, the answer, and
+    what happens when nobody answers. The ACP stdio path has asked for a long
+    time; these cover `/api/agent/start` + `/api/agent/approve`, which is what
+    the desktop and the PWA watch."""
+
+    def start(self, replies, **flags):
+        self.engine = _Scripted(replies)
+        self.client = TestClient(make_app(self.config, self.engine, allowed_hosts=["127.0.0.1"]),
+                                 base_url="http://127.0.0.1")
+        body = {"task": "make a note", "max_steps": 3}
+        body.update(flags)
+        started = self.client.post("/api/agent/start", headers=HEADERS, json=body)
+        self.assertEqual(started.status_code, 200)
+        return started.json()["id"]
+
+    def poll_until(self, sid, done):
+        for _ in range(150):
+            state = self.client.get("/api/agent/poll", params={"id": sid}, headers=HEADERS).json()
+            if done(state):
+                return state
+            threading.Event().wait(0.02)
+        self.fail(f"the run never got there: last state {state['status']} / {state['pending']}")
+
+    def ask(self, sid):
+        state = self.poll_until(sid, lambda s: s["pending"])
+        steps = [step for step in state["steps"] if step["type"] == "approval_required"]
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["approval_id"], state["pending"][0])
+        return steps[0]
+
+    def answer(self, sid, approval_id, decision):
+        return self.client.post("/api/agent/approve", headers=HEADERS,
+                               json={"id": sid, "approval_id": approval_id,
+                                     "decision": decision})
+
+    def settle(self, sid):
+        return self.poll_until(sid, lambda s: s["status"] != "running")
+
+    def test_a_gated_write_asks_the_polling_client_before_it_touches_the_disk(self):
+        sid = self.start([_call("write_file", {"path": "note.md", "content": "hi"}),
+                          {"role": "assistant", "content": "done"}],
+                         require_approval=True)
+        ask = self.ask(sid)
+        self.assertEqual(ask["name"], "write_file")
+        self.assertEqual(ask["args"], {"path": "note.md", "content": "hi"})
+        self.assertFalse((self.root / "note.md").exists(),
+                         "nothing may be written before the answer arrives")
+        self.assertEqual(self.answer(sid, ask["approval_id"], "allow_once").status_code, 200)
+        state = self.settle(sid)
+        self.assertEqual(state["status"], "done")
+        self.assertEqual((self.root / "note.md").read_text(encoding="utf-8"), "hi")
+        self.assertTrue([step for step in state["steps"]
+                         if step["type"] == "tool" and step["ok"]])
+
+    def test_the_question_carries_the_risk_and_reason_the_gate_table_owns(self):
+        for name, args, risk in (("write_file", {"path": "a.md", "content": "x"}, "medium"),
+                                 ("run_shell", {"command": "echo hi"}, "high"),
+                                 ("git_diff", {}, "low")):
+            with self.subTest(name=name):
+                sid = self.start([_call(name, args), {"role": "assistant", "content": "done"}],
+                                 require_approval=True)
+                ask = self.ask(sid)
+                self.assertEqual(ask["risk"], risk)
+                self.assertTrue(ask["reason"])
+                self.answer(sid, ask["approval_id"], "reject_once")
+                self.settle(sid)
+
+    def test_rejecting_leaves_the_disk_alone_and_says_so_to_the_model(self):
+        sid = self.start([_call("write_file", {"path": "note.md", "content": "hi"}),
+                          {"role": "assistant", "content": "done"}],
+                         require_approval=True)
+        ask = self.ask(sid)
+        self.assertEqual(self.answer(sid, ask["approval_id"], "reject_once").status_code, 200)
+        state = self.settle(sid)
+        self.assertFalse((self.root / "note.md").exists())
+        refused = next(step for step in state["steps"] if step["type"] == "tool")
+        self.assertFalse(refused["ok"])
+        self.assertIn("rejected by the user", json.dumps(refused["result"]))
+
+    def test_nobody_answering_is_a_rejection_and_not_a_hang(self):
+        with mock.patch.object(loop, "APPROVAL_TIMEOUT", 0.3):
+            sid = self.start([_call("write_file", {"path": "note.md", "content": "hi"}),
+                              {"role": "assistant", "content": "done"}],
+                             require_approval=True)
+            ask = self.ask(sid)
+            state = self.settle(sid)
+        self.assertFalse((self.root / "note.md").exists())
+        self.assertEqual(state["pending"], [])
+        refused = next(step for step in state["steps"] if step["type"] == "tool")
+        self.assertFalse(refused["ok"])
+
+    def test_cancelling_while_a_question_is_open_does_not_wait_out_the_timeout(self):
+        started = time.monotonic()
+        with mock.patch.object(loop, "APPROVAL_TIMEOUT", 60):
+            sid = self.start([_call("write_file", {"path": "note.md", "content": "hi"}),
+                              {"role": "assistant", "content": "done"}],
+                             require_approval=True)
+            self.ask(sid)
+            self.client.post("/api/agent/cancel", headers=HEADERS, json={"id": sid})
+            state = self.settle(sid)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertLess(time.monotonic() - started, 10,
+                        "a cancel should stop the wait, not extend it")
+        self.assertFalse((self.root / "note.md").exists())
+
+    def test_a_client_that_never_asks_for_approvals_is_still_denied_without_waiting(self):
+        started = time.monotonic()
+        sid = self.start([_call("write_file", {"path": "note.md", "content": "hi"}),
+                          {"role": "assistant", "content": "done"}])
+        state = self.settle(sid)
+        self.assertEqual(state["pending"], [])
+        self.assertNotIn("approval_required", [step["type"] for step in state["steps"]])
+        self.assertFalse((self.root / "note.md").exists())
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_answering_twice_or_answering_nothing_is_a_404(self):
+        sid = self.start([_call("write_file", {"path": "note.md", "content": "hi"}),
+                          {"role": "assistant", "content": "done"}],
+                         require_approval=True)
+        ask = self.ask(sid)
+        self.assertEqual(self.answer(sid, ask["approval_id"], "allow_once").status_code, 200)
+        self.assertEqual(self.answer(sid, ask["approval_id"], "allow_once").status_code, 404)
+        self.assertEqual(self.answer(sid, "not-a-real-id", "allow_once").status_code, 404)
+        self.assertEqual(self.client.post("/api/agent/approve", headers=HEADERS,
+                                          json={"id": "nope", "approval_id": ask["approval_id"],
+                                                "decision": "allow_once"}).status_code, 404)
+        self.settle(sid)
+
+    def test_an_option_outside_the_acp_vocabulary_is_refused(self):
+        sid = self.start([_call("write_file", {"path": "note.md", "content": "hi"}),
+                          {"role": "assistant", "content": "done"}],
+                         require_approval=True)
+        ask = self.ask(sid)
+        self.assertEqual(self.answer(sid, ask["approval_id"], "yes_please").status_code, 404)
+        self.assertFalse((self.root / "note.md").exists())
+        self.assertEqual(self.answer(sid, ask["approval_id"], "allow_once").status_code, 200)
+        self.settle(sid)
+
+    def test_every_gated_tool_is_a_real_tool_and_every_real_tool_has_a_risk(self):
+        """The gate table is what an approval card is built from, so a name in it
+        that is not a tool — or a gated tool missing from it — is a card that
+        lies about what the agent is about to do."""
+        from fennec_core.tools import GATES, TOOLS, approval_context
+        self.assertTrue(set(GATES) <= set(TOOLS), set(GATES) - set(TOOLS))
+        for name in TOOLS:
+            self.assertIn(approval_context(name)["risk"],
+                          {"low", "medium", "high", "unknown"})
+        # A call the table does gate must never be described as though its
+        # effects were unknown, and the reason must not claim a suite tool is
+        # something outside it.
+        for name, gate in GATES.items():
+            context = approval_context(name)
+            self.assertEqual(context["risk"], gate.risk)
+            self.assertEqual(context["reason"], gate.reason)
+        for name in set(TOOLS) - set(GATES):
+            self.assertNotIn("outside", approval_context(name)["reason"])
+
+    def test_the_sessions_list_counts_what_each_run_is_waiting_on(self):
+        """The rails list tasks from `/api/agent/sessions`, which is the only
+        place a shell that is not watching this run can learn it is blocked on a
+        question rather than still thinking."""
+        sid = self.start([_call("write_file", {"path": "note.md", "content": "hi"}),
+                          {"role": "assistant", "content": "done"}],
+                         require_approval=True)
+        ask = self.ask(sid)
+
+        def row():
+            sessions = self.client.get("/api/agent/sessions", headers=HEADERS).json()["sessions"]
+            return next(s for s in sessions if s["id"] == sid)
+
+        self.assertEqual(row()["pending"], 1)
+        self.assertEqual(row()["status"], "running")
+        self.assertEqual(self.answer(sid, ask["approval_id"], "allow_once").status_code, 200)
+        self.settle(sid)
+        self.assertEqual(row()["pending"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

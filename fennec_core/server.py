@@ -102,11 +102,18 @@ class AgentRequest(BaseModel):
     allow_write: bool = False
     allow_shell: bool = False
     allow_web: bool = False
+    require_approval: bool = False
     max_steps: int = Field(default=14, ge=1, le=40)
 
 
 class CancelRequest(BaseModel):
     id: str = Field(min_length=1, max_length=64)
+
+
+class ApprovalRequest(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    approval_id: str = Field(min_length=1, max_length=64)
+    decision: str = Field(min_length=1, max_length=32)
 
 
 class EmbedRequest(BaseModel):
@@ -488,8 +495,15 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
     def agent_start(req: AgentRequest):
         engine_or_503()
         workspace = workspace_within(config.workspace, req.workspace)
-        sid = loop.new_session(req.task, str(workspace), allow_write=req.allow_write,
-                               allow_shell=req.allow_shell, allow_web=req.allow_web,
+        # A client that answers approvals takes the jail decisions itself, so the
+        # flags are lifted the way the ACP path lifts them: the handlers stop
+        # refusing on their own, and the user's answer is what stands between the
+        # agent and the disk.
+        sid = loop.new_session(req.task, str(workspace),
+                               allow_write=req.allow_write or req.require_approval,
+                               allow_shell=req.allow_shell or req.require_approval,
+                               allow_web=req.allow_web or req.require_approval,
+                               require_approval=req.require_approval,
                                engine_client=client, outlets=agent_outlets)
         loop.start_thread(sid, req.max_steps)
         return {"id": sid, "workspace": str(workspace)}
@@ -509,10 +523,26 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
         state = loop.get_steps(req.id, 0)
         return {"cancelled": cancelled, "status": state["status"] if state else "unknown"}
 
+    @app.post("/api/agent/approve")
+    def agent_approve(req: ApprovalRequest):
+        """Answer one approval a session is waiting on.
+
+        A stale or invented id answers nothing. The run then keeps waiting until
+        its timeout and rejects, which is the same outcome as never having been
+        asked — so an unanswered question is never a silent permission.
+        """
+        if req.id not in loop.SESSIONS:
+            raise HTTPException(404, "unknown session")
+        if not loop.resolve_approval(req.id, req.approval_id, req.decision):
+            raise HTTPException(404, "no such pending approval")
+        return {"resolved": True, "decision": req.decision}
+
     @app.get("/api/agent/sessions")
     def agent_sessions():
-        return {"sessions": [{"id": sid, "task": s["task"], "status": s["status"],
-                              "steps": len(s["steps"])} for sid, s in list(loop.SESSIONS.items())]}
+        """The rails every shell lists tasks from, including how many gated
+        calls each run is waiting on — a session with a pending approval is
+        blocked on the user, not slow."""
+        return {"sessions": loop.list_sessions()}
 
     @app.get("/api/outlets")
     def outlet_status(refresh: bool = False):

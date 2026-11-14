@@ -176,9 +176,14 @@ impl Core {
 
     /// Start a supervised coding task. The `allow_*` flags are the loop's jail
     /// switches (`loop.py`), and `max_steps` is its own budget default of 14.
-    pub fn start(&self, task: &str, workspace: &str, allow_write: bool, allow_shell: bool, allow_web: bool) -> Result<String, String> {
+    /// `require_approval` is the client saying it answers `/api/agent/approve`:
+    /// core then lifts the flags and asks before every gated call, so what admits
+    /// a write is the user's answer rather than a box ticked when the run started.
+    pub fn start(&self, task: &str, workspace: &str, allow_write: bool, allow_shell: bool,
+                 allow_web: bool, require_approval: bool) -> Result<String, String> {
         let body = json!({ "task": task, "workspace": workspace, "allow_write": allow_write,
-                           "allow_shell": allow_shell, "allow_web": allow_web, "max_steps": 14 });
+                           "allow_shell": allow_shell, "allow_web": allow_web,
+                           "require_approval": require_approval, "max_steps": 14 });
         let v = self.post("/api/agent/start", &body, Duration::from_millis(4000))?;
         v["id"].as_str().map(str::to_string).ok_or_else(|| "no id in response".into())
     }
@@ -186,6 +191,16 @@ impl Core {
     /// Steps with index `>= after`, plus the session's task and status.
     pub fn poll(&self, id: &str, after: usize) -> Result<Value, String> {
         self.get(&format!("/api/agent/poll?id={id}&after={after}"))
+    }
+
+    /// Answer one gated call. `decision` is the loop's own vocabulary —
+    /// `allow_once`, `allow_always`, `reject_once`, `reject_always` — and anything
+    /// else it refuses. An approval that is no longer pending is a 404, which this
+    /// reports as an error: the card has to say the answer did not land.
+    pub fn approve(&self, id: &str, approval_id: &str, decision: &str) -> Result<(), String> {
+        self.post("/api/agent/approve",
+                  &json!({ "id": id, "approval_id": approval_id, "decision": decision }),
+                  Duration::from_millis(2000)).map(|_| ())
     }
 
     pub fn cancel(&self, id: &str) -> Result<(), String> {

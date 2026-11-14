@@ -7,9 +7,9 @@ import uuid
 
 from . import engine, tokeneconomizer
 from .context import compact, limits
-from .tools import ToolContext, execute, openai_tools
+from .tools import ToolContext, approval_context, execute, openai_tools
 
-SYSTEM = """You are Fennec Desktopr, a local coding agent running on the Fennec inference engine \
+SYSTEM = """You are Fennec, a local coding agent running on the Fennec inference engine \
 (a device-tiered MoE decoder). You solve coding tasks in the user's workspace by calling tools.
 
 Workflow:
@@ -32,7 +32,8 @@ _LOCK = threading.Lock()
 # `/api/agent/poll`. Shells mirror it -- `STEP_TYPES` in the PWA's
 # web/helpers.js, `map_step` in the desktop's events.rs -- and an unknown type
 # there is rendered or dropped, never a reason to stop watching the run.
-STEP_TYPES = ("plan", "assistant", "partial", "tool_start", "tool", "final", "error", "cancelled")
+STEP_TYPES = ("plan", "assistant", "partial", "tool_start", "tool", "final", "error",
+              "cancelled", "approval_required")
 
 # The plan these shells show is read back from the tool calls the loop actually
 # made, never from a model-authored list. `_publish_plan` puts the same list on
@@ -85,6 +86,9 @@ def new_session(task: str, workspace: str, *, allow_write: bool = False,
                 allow_shell: bool = False, allow_npu: bool = False,
                 allow_web: bool = False, require_approval: bool = False,
                 engine_client=None, outlets=None, extra=None, system_extra: str = "") -> str:
+    """Open a session. ``require_approval`` makes every gated call the user's
+    decision: an ACP turn asks through the approver it passed, a polling turn
+    asks through `/api/agent/approve`, and nobody answering is a rejection."""
     sid = uuid.uuid4().hex[:12]
     ctx = ToolContext(workspace=workspace, allow_write=allow_write, allow_shell=allow_shell,
                       allow_npu=allow_npu, allow_web=allow_web, require_approval=require_approval,
@@ -94,6 +98,7 @@ def new_session(task: str, workspace: str, *, allow_write: bool = False,
         SESSIONS[sid] = {"id": sid, "task": task, "steps": [], "status": "running",
                          "ctx": ctx, "created": time.time(), "usage": {}, "stop": None,
                          "system_extra": system_extra, "history": [],
+                         "approvals": {},
                          "cancel": threading.Event()}
     return sid
 
@@ -117,6 +122,23 @@ def _emit(sid, event):
         session["steps"].append(event)
 
 
+def _pending_ids(session) -> list:
+    """The approvals this session is waiting on, oldest first. Call it holding
+    `_LOCK`: it reads the same records `resolve_approval` writes."""
+    return [aid for aid, record in session.get("approvals", {}).items()
+            if not record["waiter"].is_set()]
+
+
+def list_sessions() -> list:
+    """One row per session for the shells' task rails. `pending` is how many
+    gated calls wait on an answer, which is what tells a rail that this run is
+    stopped on a question rather than still thinking."""
+    with _LOCK:
+        return [{"id": sid, "task": s["task"], "status": s["status"],
+                 "steps": len(s["steps"]), "pending": len(_pending_ids(s))}
+                for sid, s in SESSIONS.items()]
+
+
 def get_steps(sid, after=0):
     with _LOCK:
         session = SESSIONS.get(sid)
@@ -124,7 +146,8 @@ def get_steps(sid, after=0):
             return None
         return {"id": sid, "status": session["status"], "task": session["task"],
                 "steps": session["steps"][max(0, after):], "total": len(session["steps"]),
-                "stop": session.get("stop"), "usage": session["usage"]}
+                "stop": session.get("stop"), "usage": session["usage"],
+                "pending": _pending_ids(session)}
 
 
 def get_history(sid):
@@ -164,6 +187,65 @@ def _cancelled(sid):
         return session is None or session["cancel"].is_set()
 
 
+APPROVAL_TIMEOUT = 120.0
+_APPROVAL_OPTIONS = {"allow_once", "allow_always", "reject_once", "reject_always"}
+
+
+def request_approval(sid, name, args):
+    """Ask the client watching this session to allow or reject one tool call.
+
+    The step it publishes carries the risk and the reason from `tools.GATES`,
+    so no client has to keep its own idea of what a tool can do. Nobody
+    answering — a disconnected client, a timeout, a cancel — is a rejection,
+    which is what the same call already got silently; the difference is that
+    now the user sees the question and the answer.
+    """
+    aid = uuid.uuid4().hex[:8]
+    with _LOCK:
+        session = SESSIONS.get(sid)
+        if session is None:
+            return "reject_once"
+        session.setdefault("approvals", {})[aid] = {"waiter": threading.Event(),
+                                                    "decision": None}
+    _emit(sid, {"type": "approval_required", "approval_id": aid, "name": name,
+                "args": args if isinstance(args, dict) else {},
+                **approval_context(name)})
+    deadline = time.monotonic() + APPROVAL_TIMEOUT
+    while time.monotonic() < deadline:
+        with _LOCK:
+            session = SESSIONS.get(sid)
+            record = (session or {}).get("approvals", {}).get(aid)
+            cancelled = session is None or session["cancel"].is_set()
+        if record is None:
+            break
+        if record["waiter"].is_set():
+            break
+        if cancelled:
+            break
+        record["waiter"].wait(0.25)
+    with _LOCK:
+        session = SESSIONS.get(sid)
+        record = (session or {}).get("approvals", {}).get(aid) if session else None
+        decision = (record or {}).get("decision")
+        if session is not None and record is not None:
+            session.get("approvals", {}).pop(aid, None)
+    return decision if decision in _APPROVAL_OPTIONS else "reject_once"
+
+
+def resolve_approval(sid, approval_id, decision):
+    """Answer a pending approval. Returns False if it was never asked or is gone."""
+    if decision not in _APPROVAL_OPTIONS:
+        return False
+    with _LOCK:
+        session = SESSIONS.get(sid)
+        record = (session or {}).get("approvals", {}).get(approval_id)
+        if record is None:
+            return False
+        record["decision"] = decision
+        record["waiter"].set()
+        return True
+
+
 def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=False,
               history=None):
     """Drive one agent turn.
@@ -172,7 +254,10 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
     needs ``stream=True`` for token deltas. ``approve(name, args)`` returns an
     ACP permission option (allow_once, allow_always, reject_once,
     reject_always) and, when present, gated tools are advertised and confirmed
-    at call time instead of hidden by session flags. ``history`` is the prior
+    at call time instead of hidden by session flags. A session opened with
+    ``require_approval`` and no explicit approver gets one built from
+    :func:`request_approval`, so a polling client answers over HTTP.
+    ``history`` is the prior
     transcript of an ACP session; the finished transcript is stored back on the
     session under ``history`` so the next turn continues this one.
     """
@@ -198,6 +283,10 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
     else:
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": session["task"]}]
+    if approve is None and ctx.require_approval:
+        # A polling client declared it can answer, so the question goes to it.
+        def approve(name, args, _sid=sid):
+            return request_approval(_sid, name, args)
     tools = openai_tools(ctx, advertise_all=approve is not None)
     budget = limits()
     seen: dict[str, str] = {}

@@ -1,4 +1,4 @@
-![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2021, 227 Python tests, 6 Rust crates, 22 golden tests, MIT license.](docs/hero.png)
+![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2021, 237 Python tests, 6 Rust crates, 22 golden tests, MIT license.](docs/hero.png)
 
 ---
 
@@ -6,7 +6,7 @@
 
 | Python tests | Rust golden tests | Rust crates | Python modules | Runtime deps | `fennec-rs` binary |
 |:---:|:---:|:---:|:---:|:---:|:---:|
-| 227 in 9 files | 22 in 5 crates | 6 | 16 | 4 | ≈ 1.9 MB |
+| 237 in 9 files | 22 in 5 crates | 6 | 16 | 4 | ≈ 1.9 MB |
 
 Counts taken from `tests/` and `src/*/tests/`. Binary size measured from
 `fennec-cli/target/release/fennec-rs.exe` (Windows x64 `cargo build --release --offline`, 1,897,180 bytes at 1.0.0).
@@ -190,7 +190,7 @@ fennec setup --yes --install-deps                  # pip install missing core de
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v     # 227 checks across 9 files
+python -m unittest discover -s tests -v     # 237 checks across 9 files
 cd src && cargo test --offline             # 22 golden tests across 5 crates
 ```
 
