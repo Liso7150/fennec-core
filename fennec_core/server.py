@@ -738,7 +738,16 @@ def main(argv=None):
                 kind = step.get("type")
                 if kind == "tool":
                     print(f"[tool] {step.get('name')} -> {'ok' if step.get('ok') else 'failed'}")
-                elif kind in ("assistant", "final", "error", "cancelled"):
+                elif kind == "tool_start":
+                    # A command can run for minutes; without this the terminal is
+                    # silent while the only thing a user can see is a spinner of
+                    # their own making.
+                    print(f"[tool] {step.get('name')} running")
+                elif kind == "plan":
+                    done = sum(1 for e in step.get("entries", []) if e.get("status") == "completed")
+                    print(f"[plan] {done}/{len(step.get('entries', []))} "
+                          f"{' · '.join(e.get('content', '') for e in step.get('entries', []))}")
+                elif kind in ("assistant", "final", "error", "cancelled", "partial"):
                     print(f"[{kind}] {step.get('content', '')}")
             after = state["total"]
             if state["status"] != "running":

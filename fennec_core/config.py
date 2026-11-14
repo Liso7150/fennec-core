@@ -15,6 +15,10 @@ class ConfigError(ValueError):
     pass
 
 
+BACKENDS = ("auto", "cuda", "vulkan", "metal", "cpu")
+POLICIES = ("quality", "balanced", "experimental-fast")
+
+
 def is_loopback(host: str) -> bool:
     if host.lower() == "localhost":
         return True
@@ -66,7 +70,7 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
         raise ConfigError("Secrets belong in environment variables, not configuration JSON")
 
     values = {
-        "engine_root": str(home / "Colibri"),
+        "engine_root": str(home / "Fennec"),
         "suite_root": str(home / "Fennec-Suite"),
         "models_root": str(home / "fennec-models"),
         "cache_root": str(home / ".cache" / "fennec"),
@@ -85,6 +89,13 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
     }.items():
         if variable in env:
             values[key] = env[variable]
+    # A Colibri checkout already on disk stays the fallback engine root, so an
+    # install that predates the Rust engine keeps launching. Mirrors
+    # fennec-environment-setup/fennec_setup/config.py:resolve_config.
+    if "engine_root" not in data and "FENNEC_HOME" not in env:
+        colibri = home / "Colibri"
+        if not (home / "Fennec").exists() and colibri.exists():
+            values["engine_root"] = str(colibri)
     for key, value in values.items():
         if key != "ctx" and (not isinstance(value, str)
                              or (not value.strip() and key not in {"model", "jev_root"})):
@@ -103,10 +114,10 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
     elif not Path(executable).is_absolute():
         executable = shutil.which(executable) or str(_path(executable, location.parent))
     values["python"] = executable
-    if values["backend"] not in {"auto", "vulkan", "metal", "cpu"}:
-        raise ConfigError("backend must be auto, vulkan, metal or cpu")
-    if values["policy"] not in {"quality", "balanced", "experimental-fast"}:
-        raise ConfigError("policy must be quality, balanced or experimental-fast")
+    if values["backend"] not in BACKENDS:
+        raise ConfigError(f"backend must be one of {', '.join(BACKENDS)}")
+    if values["policy"] not in POLICIES:
+        raise ConfigError(f"policy must be one of {', '.join(POLICIES)}")
     if type(values["ctx"]) is not int or not 0 <= values["ctx"] <= 1_048_576:
         raise ConfigError("ctx must be an integer from 0 (automatic) to 1048576")
     try:

@@ -28,8 +28,15 @@ MAX_SESSIONS = 50
 SESSIONS: dict = {}
 _LOCK = threading.Lock()
 
-# ACP shows a plan while the turn runs; these phases are read back from the tool
-# calls the loop actually made, never from a model-authored list.
+# Every step type the loop can put in `session["steps"]`, which is the body of
+# `/api/agent/poll`. Shells mirror it -- `STEP_TYPES` in the PWA's
+# web/helpers.js, `map_step` in the desktop's events.rs -- and an unknown type
+# there is rendered or dropped, never a reason to stop watching the run.
+STEP_TYPES = ("plan", "assistant", "partial", "tool_start", "tool", "final", "error", "cancelled")
+
+# The plan these shells show is read back from the tool calls the loop actually
+# made, never from a model-authored list. `_publish_plan` puts the same list on
+# both channels: an ACP session update and a poll step.
 _PHASE_ORDER = ("inspect", "implement", "verify", "summarise")
 _PHASE_LABEL = {"inspect": "Inspect the workspace",
                 "implement": "Implement the change",
@@ -61,9 +68,17 @@ def plan_entries(used) -> list:
     return entries
 
 
-def _publish_plan(sink, used):
+def _publish_plan(sid, sink, used):
+    """Send the one plan list to both channels a client can be watching.
+
+    ACP gets a session update; ``/api/agent/poll`` gets a step, so a polling
+    shell reads the plan from here instead of re-deriving phases from tool
+    names in its own language.
+    """
+    entries = plan_entries(used)
+    _emit(sid, {"type": "plan", "entries": entries})
     if sink is not None:
-        sink({"type": "plan", "entries": plan_entries(used)})
+        sink({"type": "plan", "entries": entries})
 
 
 def new_session(task: str, workspace: str, *, allow_write: bool = False,
@@ -188,7 +203,7 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
     seen: dict[str, str] = {}
     always = set()
     used_phases = set()
-    _publish_plan(sink, used_phases)
+    _publish_plan(sid, sink, used_phases)
     try:
         for _ in range(max(1, min(max_steps, MAX_STEPS))):
             if _cancelled(sid):
@@ -257,7 +272,7 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
                 return
             if not tool_calls:
                 used_phases.add("summarise")
-                _publish_plan(sink, used_phases)
+                _publish_plan(sid, sink, used_phases)
                 _emit(sid, {"type": "final", "content": assistant["content"]})
                 _finish(sid, "done", "end_turn")
                 return
@@ -288,7 +303,7 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
                     sink({"type": "tool_end", "name": call["name"], "args": call["args"],
                           "result": result, "ok": result.get("ok", False), "call_id": call_id})
                 used_phases.update(_PHASES.get(call["name"], ()))
-                _publish_plan(sink, used_phases)
+                _publish_plan(sid, sink, used_phases)
                 rendered = json.dumps(result, ensure_ascii=False)
                 bridge.tool_result(tc.get("id", call["name"]), rendered,
                                    bool(result.get("ok", False)))

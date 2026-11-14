@@ -13,6 +13,8 @@ import subprocess
 import threading
 import time
 
+from . import __version__
+
 PROTOCOL_VERSION = "2024-11-05"
 CALL_TIMEOUT_S = 120
 
@@ -52,7 +54,7 @@ class StdioServer:
             raise McpError(f"{self.name}: cannot start ({exc})") from exc
         threading.Thread(target=self._pump, args=(self._process.stdout,), daemon=True).start()
         self._call("initialize", {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-                                  "clientInfo": {"name": "fennec", "version": "2.0.0"}}, timeout=20)
+                                  "clientInfo": {"name": "fennec", "version": __version__}}, timeout=20)
         self._notify("notifications/initialized", {})
         return self
 

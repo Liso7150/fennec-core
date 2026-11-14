@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import queue
 import shutil
 import subprocess
 import tempfile
@@ -23,6 +24,54 @@ class EngineError(RuntimeError):
 
 class EngineCancelled(EngineError):
     """The turn was aborted while the engine was still answering."""
+
+
+ABORT_POLL_S = 0.25
+_STREAM_DONE = object()
+
+
+def abortable_lines(response, abort, poll_s=ABORT_POLL_S):
+    """Iterate a response while noticing ``abort`` even if the engine goes silent.
+
+    The blocking read has to live on its own thread: a shorter socket timeout
+    poisons urllib's socket file for good ("cannot read from timed out object"),
+    and on Windows neither closing the response nor shutting the socket down
+    wakes a recv that is already blocked. Waiting on the queue with a deadline
+    keeps the read itself untouched, so normal streaming is unchanged.
+    """
+    if abort is None:
+        yield from response
+        return
+    lines = queue.Queue()
+    stopped = threading.Event()
+
+    def pump():
+        try:
+            for raw in response:
+                if stopped.is_set():
+                    return
+                lines.put((raw, None))
+        except BaseException as exc:
+            lines.put((None, exc))
+        finally:
+            lines.put((_STREAM_DONE, None))
+
+    threading.Thread(target=pump, daemon=True, name="fennec-sse").start()
+    try:
+        while True:
+            if abort():
+                return
+            try:
+                raw, error = lines.get(timeout=poll_s)
+            except queue.Empty:
+                continue
+            if raw is _STREAM_DONE:
+                return
+            if error is not None:
+                raise error
+            yield raw
+    finally:
+        stopped.set()
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -45,6 +94,22 @@ def vulkan_loader_present(exists=None, system=None, environ=None):
         root = env.get("SystemRoot") or env.get("SYSTEMROOT") or "C:\\Windows"
         return probe(os.path.join(root, "System32", "vulkan-1.dll"))
     return any(probe(candidate) for candidate in VULKAN_LINUX)
+
+
+def native_fennec(root):
+    """The native Rust binary under an engine root, or None.
+
+    The same three places the desktop's runtimePaths probes, in the same order.
+    """
+    if root is None:
+        return None
+    names = ("fennec.exe", "fennec") if os.name == "nt" else ("fennec",)
+    for rel in ("target/release", "target/debug", "."):
+        for name in names:
+            candidate = Path(root) / rel / name
+            if candidate.is_file():
+                return candidate
+    return None
 
 
 def spawn_options(python):
@@ -115,15 +180,21 @@ class Engine:
             env.pop(key, None)
         env.update(HF_HOME=str(self.config.cache_root / "huggingface"),
                    COLI_MODEL=self.config.model, COLI_API_KEY=self.config.api_key)
-        # serve has no --backend flag. `auto` still needs the request: without it the
-        # engine logs "COLI_VULKAN is not set: the Vulkan device stays unused" and runs
-        # CPU + RAM + SSD only. --auto-tier then plans GPU, host pool and disk stream.
+        # Both engines read the COLI_* flags, but not with the same meaning.
+        # Fennec resolves an unset backend by vendor (NVIDIA=cuda, Apple=metal,
+        # else vulkan) and an env flag outranks that policy, so pinning
+        # COLI_VULKAN would force an NVIDIA card off its CUDA tier. Colibri has
+        # no such policy: without the flag it logs "COLI_VULKAN is not set: the
+        # Vulkan device stays unused" and runs CPU + RAM + SSD only.
         if self.config.backend == "auto":
-            if vulkan_loader_present():
+            if native_fennec(getattr(self.config, "engine_root", None)) is None \
+                    and vulkan_loader_present():
                 env["COLI_VULKAN"] = "1"
-                # 4 GB of host expert pool costs ~6 % decode against the engine's
+                # 4 GB of host expert pool costs ~6 % decode against Colibri's
                 # 13 GB default (13.95 vs 14.88 tok/s, 2026-11-10) and gives back
-                # ~9 GB of RAM; 2 GB collapses to 6.27 tok/s.
+                # ~9 GB of RAM; 2 GB collapses to 6.27 tok/s. Fennec reads the
+                # same variable as its whole host expert budget, where 4 GB
+                # starves residency, so it keeps its own default.
                 if "COLI_VK_TIER_HOST_GB" not in env:
                     env["COLI_VK_TIER_HOST_GB"] = "4"
         else:
@@ -132,12 +203,31 @@ class Engine:
                 env["COLI_" + self.config.backend.upper()] = "1"
         return env
 
+    def _engine_binary(self):
+        """Fennec is a native Rust binary; Colibri was a Python launcher.
+
+        Fennec wins when both are installed: it is the engine this suite is
+        built around. A Colibri checkout still works for anyone who has not
+        built the Rust side, because the HTTP contract is identical.
+        """
+        root = self.config.engine_root
+        candidate = native_fennec(root)
+        if candidate is not None:
+            return candidate, "fennec"
+        launcher = root / "c" / "coli"
+        if launcher.is_file():
+            return launcher, "colibri"
+        raise EngineError(
+            "No engine found under engine_root: build Fennec "
+            "(cargo build --release) or point engine_root at an existing installation"
+        )
+
     def _command(self, args):
-        launcher = self.config.engine_root / "c" / "coli"
-        if not launcher.is_file():
-            raise EngineError("Fennec launcher missing; configure engine_root with an existing installation")
+        binary, kind = self._engine_binary()
         python, options = spawn_options(self.config.python)
-        return [python, str(launcher), *args], options
+        if kind == "fennec":
+            return [str(binary), *args], options
+        return [python, str(binary), *args], options
 
     def _model_args(self):
         if not self.config.model or not Path(self.config.model).is_dir():
@@ -292,7 +382,8 @@ class Engine:
         Events: ``text`` / ``reasoning`` deltas, ``tool_delta`` per fragment,
         ``finish`` when the engine names a stop reason, and
         ``result`` = {"message", "usage", "finish_reason"}. ``abort`` is polled
-        between SSE lines, so a cancelled turn keeps the partial message.
+        while the engine is silent as well as between SSE lines, so a cancelled
+        turn keeps the partial message.
         """
         body = {"model": self.model_id(), "messages": messages, "max_tokens": max_tokens,
                 "temperature": temperature, "stream": True}
@@ -310,7 +401,6 @@ class Engine:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
         content, reasoning, usage, finish = "", "", {}, None
         calls: dict = {}
-        cancelled = False
         try:
             with opener.open(request, timeout=timeout) as response:
                 if "text/event-stream" not in (response.headers.get("content-type") or ""):
@@ -321,10 +411,7 @@ class Engine:
                     yield {"type": "result", "message": message, "usage": plain_usage,
                            "finish_reason": choice.get("finish_reason") or "stop"}
                     return
-                for raw in response:
-                    if abort is not None and abort():
-                        cancelled = True
-                        break
+                for raw in abortable_lines(response, abort):
                     line = raw.decode("utf-8", "replace").strip()
                     if not line.startswith("data:"):
                         continue
@@ -371,6 +458,7 @@ class Engine:
         except Exception as exc:
             raise EngineError(self._redact("Engine stream failed; check engine health") +
                               f": {type(exc).__name__}") from exc
+        cancelled = abort is not None and abort()
         if cancelled:
             finish = "cancelled"
         message, usage = self._result({"content": content, "reasoning_content": reasoning,

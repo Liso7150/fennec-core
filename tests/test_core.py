@@ -297,8 +297,51 @@ class ChatAndAgentTests(ClientCase):
                 break
             threading.Event().wait(0.02)
         self.assertEqual(state["status"], "done")
-        self.assertEqual([step["type"] for step in state["steps"]], ["assistant", "final"])
+        # The loop publishes its plan twice: at turn start, before any tool has
+        # run, and again when the turn ends without one. Poll carries both, so a
+        # shell never has to re-derive phases from tool names of its own.
+        self.assertEqual([step["type"] for step in state["steps"]],
+                         ["plan", "assistant", "plan", "final"])
+        plans = [step for step in state["steps"] if step["type"] == "plan"]
+        # Nothing has happened yet, so the first list is only the next stage --
+        # and not marked complete, which is the whole point of the rule.
+        self.assertEqual([(e["content"], e["status"]) for e in plans[0]["entries"]],
+                         [(loop._PHASE_LABEL["inspect"], "in_progress")])
+        self.assertEqual([e["content"] for e in plans[-1]["entries"]],
+                         [loop._PHASE_LABEL["summarise"]])
+        self.assertEqual(plans[-1]["entries"][0]["status"], "completed")
         self.assertEqual(state["usage"]["total_tokens"], 3)
+
+    def test_poll_steps_stay_inside_the_declared_vocabulary(self):
+        # The PWA and the desktop each mirror `loop.STEP_TYPES`, and a step
+        # outside that list reaches a shell as an unrecognized row, so the
+        # declaration has to be complete. The tool path is where the newer types
+        # come from at all, so drive it rather than reading the source.
+        self.engine.reply = {"role": "assistant", "content": "looking", "tool_calls": [
+            {"id": "call-1", "type": "function",
+             "function": {"name": "list_dir", "arguments": "{}"}}]}
+        sid = self.client.post("/api/agent/start", headers=HEADERS,
+                               json={"task": "list the files", "max_steps": 1}).json()["id"]
+        for _ in range(150):
+            state = self.client.get("/api/agent/poll", params={"id": sid}, headers=HEADERS).json()
+            if state["status"] != "running":
+                break
+            threading.Event().wait(0.02)
+        types = [step["type"] for step in state["steps"]]
+        self.assertTrue(set(types) <= set(loop.STEP_TYPES), types)
+        self.assertEqual(types, ["plan", "assistant", "tool_start", "tool", "plan", "final"])
+        started = next(step for step in state["steps"] if step["type"] == "tool_start")
+        done = next(step for step in state["steps"] if step["type"] == "tool")
+        # The pair key a shell closes a running row with, in both steps.
+        self.assertEqual(started["call_id"], done["call_id"])
+        plans = [step for step in state["steps"] if step["type"] == "plan"]
+        self.assertEqual([entry["status"] for entry in plans[-1]["entries"]],
+                         ["completed", "in_progress"])
+        # A shell walks the list with `after`; the new steps must not shift it.
+        tail = self.client.get("/api/agent/poll", params={"id": sid, "after": 2},
+                               headers=HEADERS).json()
+        self.assertEqual([step["type"] for step in tail["steps"]], types[2:])
+        self.assertEqual(tail["total"], len(types))
 
     def test_agent_rejects_workspace_outside_root(self):
         response = self.client.post("/api/agent/start", headers=HEADERS,
@@ -583,10 +626,19 @@ class ConfigTests(unittest.TestCase):
     def test_backend_and_policy_enums_are_enforced(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
-            for bad in ({"backend": "cuda"}, {"policy": "speed"}, {"ctx": -1}, {"ctx": 3.5}):
+            for bad in ({"backend": "rocm"}, {"policy": "speed"}, {"ctx": -1}, {"ctx": 3.5}):
                 path.write_text(json.dumps(bad), encoding="utf-8")
                 with self.assertRaises(ConfigError, msg=bad):
                     load_config(path, environ={}, home=Path(tmp))
+
+    def test_every_wizard_backend_loads(self):
+        """The wizard offers cuda, so the runtime schema has to accept it too."""
+        from fennec_core.config import BACKENDS
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            for backend in BACKENDS:
+                path.write_text(json.dumps({"backend": backend}), encoding="utf-8")
+                self.assertEqual(load_config(path, environ={}, home=Path(tmp)).backend, backend)
 
     def test_env_overrides_and_ctx_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -611,6 +663,28 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ConfigError):
                 load_config(Path(tmp) / "missing.json", environ={}, home=Path(tmp))
+
+    def test_engine_root_defaults_to_fennec_and_falls_back_to_colibri(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fennec, colibri = home / "Fennec", home / "Colibri"
+            self.assertEqual(load_config(environ={}, home=home).engine_root, fennec.resolve())
+            colibri.mkdir()
+            self.assertEqual(load_config(environ={}, home=home).engine_root, colibri.resolve())
+            fennec.mkdir()
+            self.assertEqual(load_config(environ={}, home=home).engine_root, fennec.resolve())
+
+    def test_an_explicit_engine_root_beats_the_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "Colibri").mkdir()
+            path = home / "config.json"
+            path.write_text(json.dumps({"engine_root": str(home / "elsewhere")}), encoding="utf-8")
+            self.assertEqual(load_config(path, environ={}, home=home).engine_root,
+                             (home / "elsewhere").resolve())
+            env = {"FENNEC_HOME": str(home / "from-env")}
+            self.assertEqual(load_config(environ=env, home=home).engine_root,
+                             (home / "from-env").resolve())
 
 
 class EngineEnvironmentTests(unittest.TestCase):
@@ -639,6 +713,85 @@ class EngineEnvironmentTests(unittest.TestCase):
             self.assertNotIn("COLI_VULKAN", engine.Engine._engine_env(stub))
         stub.config.backend = "cpu"
         self.assertEqual(engine.Engine._engine_env(stub).get("COLI_VULKAN"), "0")
+
+    def test_auto_leaves_a_native_fennec_engine_to_its_vendor_policy(self):
+        """Fennec picks CUDA on NVIDIA itself; an env pin would outrank that."""
+        from types import SimpleNamespace
+        from fennec_core import engine
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stub = SimpleNamespace(config=SimpleNamespace(
+                backend="auto", cache_root=root / "cache", model="m",
+                api_key="local", engine_root=root))
+            with mock.patch.object(engine, "vulkan_loader_present", return_value=True):
+                env = engine.Engine._engine_env(stub)
+                self.assertEqual(env.get("COLI_VULKAN"), "1", "no binary yet: Colibri pinning")
+                self.assertEqual(env.get("COLI_VK_TIER_HOST_GB"), "4")
+                release = root / "target" / "release"
+                release.mkdir(parents=True)
+                (release / ("fennec.exe" if os.name == "nt" else "fennec")).write_bytes(b"")
+                env = engine.Engine._engine_env(stub)
+                self.assertNotIn("COLI_VULKAN", env)
+                self.assertNotIn("COLI_VK_TIER_HOST_GB", env)
+
+
+class EngineBinaryTests(unittest.TestCase):
+    """The suite spawns Fennec, a native binary, not Colibri's Python launcher."""
+
+    def setUp(self):
+        from fennec_core import engine
+        self.engine = engine
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.config = SimpleNamespace(engine_root=self.root, python="python", model=str(self.root))
+        self.stub = SimpleNamespace(config=self.config)
+        # _command dispatches through _engine_binary; bind it onto the stub the
+        # same way the other tests call unbound Engine methods.
+        self.stub._engine_binary = lambda: engine.Engine._engine_binary(self.stub)
+
+    def write(self, rel):
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("", encoding="utf-8")
+        return p
+
+    def test_fennec_is_preferred_over_an_installed_colibri(self):
+        binary = self.write("target/release/fennec.exe" if os.name == "nt" else "target/release/fennec")
+        self.write("c/coli")
+        found, kind = self.engine.Engine._engine_binary(self.stub)
+        self.assertEqual(kind, "fennec")
+        self.assertEqual(found, binary)
+
+    def test_a_debug_build_is_found_when_release_is_absent(self):
+        binary = self.write("target/debug/fennec.exe" if os.name == "nt" else "target/debug/fennec")
+        found, kind = self.engine.Engine._engine_binary(self.stub)
+        self.assertEqual(kind, "fennec")
+        self.assertEqual(found, binary)
+
+    def test_colibri_remains_a_fallback(self):
+        launcher = self.write("c/coli")
+        found, kind = self.engine.Engine._engine_binary(self.stub)
+        self.assertEqual(kind, "colibri")
+        self.assertEqual(found, launcher)
+
+    def test_no_engine_is_an_error_not_a_silent_success(self):
+        with self.assertRaises(self.engine.EngineError):
+            self.engine.Engine._engine_binary(self.stub)
+
+    def test_the_native_binary_is_not_wrapped_in_python(self):
+        binary = self.write("target/release/fennec.exe" if os.name == "nt" else "target/release/fennec")
+        command, _ = self.engine.Engine._command(self.stub, ["serve", "--auto-tier"])
+        self.assertEqual(command[0], str(binary))
+        self.assertNotIn("python", command[0].lower())
+        self.assertEqual(command[1:], ["serve", "--auto-tier"])
+
+    def test_the_colibri_launcher_still_runs_under_python(self):
+        launcher = self.write("c/coli")
+        command, _ = self.engine.Engine._command(self.stub, ["serve"])
+        self.assertEqual(command[1], str(launcher))
+        self.assertEqual(command[2:], ["serve"])
+        self.assertIn("python", command[0].lower())
 
 
 if __name__ == "__main__":

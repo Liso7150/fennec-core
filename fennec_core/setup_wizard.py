@@ -33,9 +33,11 @@ INPUT_KEYS = {
     "root", "engine_root", "suite_root", "models_root", "cache_root", "python",
     "model", "engine_url", "backend", "ctx", "policy",
 }
-BACKENDS = ("auto", "vulkan", "metal", "cpu")
+BACKENDS = ("auto", "cuda", "vulkan", "metal", "cpu")
 POLICIES = ("quality", "balanced", "experimental-fast")
 ENGINE_FILES = ("c/coli", "c/openai_server.py")
+# The same three places the desktop's runtimePaths probes for the native engine.
+FENNEC_DIRS = (("target", "release"), ("target", "debug"), ())
 CORE_DEPS = ("fastapi", "uvicorn", "psutil", "pydantic")
 MIN_PYTHON = (3, 10)
 PYTHON_PROBE = (
@@ -234,13 +236,30 @@ def install_dependencies(python: str, *, venv: bool = False, packages=CORE_DEPS,
     return result.returncode == 0
 
 
+def fennec_binary(directory):
+    path = Path(str(directory or "")).expanduser()
+    exe = "fennec.exe" if sys.platform == "win32" else "fennec"
+    for rel in FENNEC_DIRS:
+        cli = path.joinpath(*rel, exe)
+        if cli.is_file():
+            return str(cli)
+    return None
+
+
 def validate_engine(directory) -> dict:
     path = Path(str(directory or "")).expanduser()
     is_directory = path.is_dir()
     missing = [relative for relative in ENGINE_FILES if not (path / relative).is_file()]
+    # A native Fennec checkout has no c/coli, and the runtime already prefers it,
+    # so rejecting it here would fail a folder the suite can actually run.
+    if is_directory and missing:
+        cli = fennec_binary(path)
+        if cli:
+            return {"ok": True, "path": str(path), "missing": [], "is_directory": True,
+                    "kind": "fennec", "cli": cli}
     return {"ok": is_directory and not missing, "path": str(path),
             "missing": missing if is_directory else list(ENGINE_FILES),
-            "is_directory": is_directory}
+            "is_directory": is_directory, "kind": "colibri"}
 
 
 def scan_models(directory, *, limit: int = 40) -> list[dict]:
@@ -342,7 +361,7 @@ def validate_config(data) -> dict:
         elif not isinstance(value, str) or (not value.strip() and key != "model"):
             raise ValueError(f"{key} must be a nonempty string")
     if data.get("backend", "auto") not in BACKENDS:
-        raise ValueError("backend must be auto, vulkan, metal or cpu")
+        raise ValueError(f"backend must be one of {', '.join(BACKENDS)}")
     if data.get("policy", "quality") not in POLICIES:
         raise ValueError("policy must be quality, balanced or experimental-fast")
     try:
@@ -535,7 +554,7 @@ def main(argv=None, *, config=None, home=None, environ=None, input_fn=None,
         prog="fennec setup",
         description="Detect Python, the engine and models, then write the shared Fennec config.")
     parser.add_argument("--root", help="install root (default: ~/Fennec)")
-    parser.add_argument("--engine-root", help="Colibri checkout containing c/coli")
+    parser.add_argument("--engine-root", help="Fennec checkout, or Colibri checkout containing c/coli")
     parser.add_argument("--suite-root", help="Fennec suite checkout root")
     parser.add_argument("--models-root", help="model directory")
     parser.add_argument("--cache-root", help="cache directory")
@@ -587,8 +606,8 @@ def main(argv=None, *, config=None, home=None, environ=None, input_fn=None,
         return 1
     engine = validate_engine(config_values["engine_root"])
     if not engine["ok"]:
-        message = (f"engine checkout is missing c/coli and c/openai_server.py: "
-                   f"{config_values['engine_root']}")
+        message = (f"engine checkout has neither a Fennec binary nor "
+                   f"c/coli and c/openai_server.py: {config_values['engine_root']}")
         if not args.dry_run:
             warn(f"fennec setup: {message}. Run fennec-installer or pass --engine-root.")
             return 2
