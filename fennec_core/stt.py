@@ -17,7 +17,15 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BYTES = 16 << 20
-DEFAULT_MODEL = os.environ.get("COLI_STT_MODEL", "base.en")
+
+
+def knob(name, default):
+    """FENNEC_<NAME> is the spelling this suite documents; COLI_<NAME> is the
+    alias a Colibri-era setup still uses."""
+    return os.environ.get("FENNEC_" + name) or os.environ.get("COLI_" + name) or default
+
+
+DEFAULT_MODEL = knob("STT_MODEL", "base.en")
 ADMISSIBLE = {"127.0.0.1", "::1", "localhost"}
 
 _model = None
@@ -105,7 +113,7 @@ def serve(port=8183, model_name=DEFAULT_MODEL, host="127.0.0.1"):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Local Fennec speech-to-text sidecar")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("COLI_STT_PORT", "8183")))
+    parser.add_argument("--port", type=int, default=int(knob("STT_PORT", "8183")))
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args(argv)

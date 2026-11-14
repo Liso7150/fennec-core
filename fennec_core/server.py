@@ -342,8 +342,9 @@ def _ag_ui_max_steps(value) -> int:
 def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
     client = engine_client or get_engine()
     agent_outlets = Outlets(config)
-    hosts = set(LOOPBACK_HOSTS) | {h.strip().lower() for h in
-                                   os.environ.get("COLI_ALLOWED_HOSTS", "").split(",") if h.strip()}
+    extra = (os.environ.get("FENNEC_ALLOWED_HOSTS")
+             or os.environ.get("COLI_ALLOWED_HOSTS") or "")
+    hosts = set(LOOPBACK_HOSTS) | {h.strip().lower() for h in extra.split(",") if h.strip()}
     if allowed_hosts:
         hosts |= {h.strip().lower() for h in allowed_hosts if h.strip()}
 

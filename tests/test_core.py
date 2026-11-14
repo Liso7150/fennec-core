@@ -704,15 +704,28 @@ class EngineEnvironmentTests(unittest.TestCase):
                                                       model="m", api_key="local"))
         with mock.patch.object(engine, "vulkan_loader_present", return_value=True):
             env = engine.Engine._engine_env(stub)
+            # The launcher writes both spellings: Fennec reads its own name, a
+            # Colibri checkout still reads COLI_*.
+            self.assertEqual(env.get("FENNEC_VULKAN"), "1")
             self.assertEqual(env.get("COLI_VULKAN"), "1")
+            self.assertEqual(env.get("FENNEC_VK_TIER_HOST_GB"), "4")
             self.assertEqual(env.get("COLI_VK_TIER_HOST_GB"), "4")
-        with mock.patch.object(engine, "vulkan_loader_present", return_value=True), \
-                mock.patch.dict(os.environ, {"COLI_VK_TIER_HOST_GB": "9"}):
-            self.assertEqual(engine.Engine._engine_env(stub).get("COLI_VK_TIER_HOST_GB"), "9")
+        for spelling in ("COLI_VK_TIER_HOST_GB", "FENNEC_VK_TIER_HOST_GB"):
+            with mock.patch.object(engine, "vulkan_loader_present", return_value=True), \
+                    mock.patch.dict(os.environ, {spelling: "9"}):
+                env = engine.Engine._engine_env(stub)
+                self.assertEqual(env.get(spelling), "9", f"{spelling} is the user's own setting")
+                self.assertIsNone(env.get("FENNEC_VK_TIER_HOST_GB" if spelling.startswith("COLI")
+                                           else "COLI_VK_TIER_HOST_GB"),
+                                  "a set knob is never pinned to the 4 GB default")
         with mock.patch.object(engine, "vulkan_loader_present", return_value=False):
-            self.assertNotIn("COLI_VULKAN", engine.Engine._engine_env(stub))
+            env = engine.Engine._engine_env(stub)
+            for spelling in ("FENNEC_VULKAN", "COLI_VULKAN"):
+                self.assertNotIn(spelling, env, f"{spelling} leaked in from the parent env")
         stub.config.backend = "cpu"
-        self.assertEqual(engine.Engine._engine_env(stub).get("COLI_VULKAN"), "0")
+        env = engine.Engine._engine_env(stub)
+        self.assertEqual(env.get("FENNEC_VULKAN"), "0")
+        self.assertEqual(env.get("COLI_VULKAN"), "0")
 
     def test_auto_leaves_a_native_fennec_engine_to_its_vendor_policy(self):
         """Fennec picks CUDA on NVIDIA itself; an env pin would outrank that."""
@@ -726,13 +739,17 @@ class EngineEnvironmentTests(unittest.TestCase):
             with mock.patch.object(engine, "vulkan_loader_present", return_value=True):
                 env = engine.Engine._engine_env(stub)
                 self.assertEqual(env.get("COLI_VULKAN"), "1", "no binary yet: Colibri pinning")
+                self.assertEqual(env.get("FENNEC_VULKAN"), "1")
                 self.assertEqual(env.get("COLI_VK_TIER_HOST_GB"), "4")
+                self.assertEqual(env.get("FENNEC_VK_TIER_HOST_GB"), "4")
                 release = root / "target" / "release"
                 release.mkdir(parents=True)
                 (release / ("fennec.exe" if os.name == "nt" else "fennec")).write_bytes(b"")
                 env = engine.Engine._engine_env(stub)
-                self.assertNotIn("COLI_VULKAN", env)
+                for spelling in ("FENNEC_VULKAN", "COLI_VULKAN"):
+                    self.assertNotIn(spelling, env, f"{spelling} would outrank vendor policy")
                 self.assertNotIn("COLI_VK_TIER_HOST_GB", env)
+                self.assertNotIn("FENNEC_VK_TIER_HOST_GB", env)
 
 
 class EngineBinaryTests(unittest.TestCase):
