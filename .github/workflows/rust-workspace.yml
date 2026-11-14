@@ -16,13 +16,20 @@ on:
 
 jobs:
   test:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: src
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
       - name: Unit tests + goldens
         run: cargo test --release -p fennec-client -p fennec-economy -p fennec-outlets -p fennec-acp -p fennec-preflight -p fennec-pyjson
       - name: Build the client others path-depend on
