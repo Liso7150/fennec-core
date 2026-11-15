@@ -1,18 +1,18 @@
-![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2021, 237 Python tests, 6 Rust crates, 22 golden tests, MIT license.](docs/hero.png)
+![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2021, 251 Python tests, 6 Rust crates, 53 Rust tests, MIT license.](docs/hero.png)
 
 ---
 
 ## At a glance
 
-| Python tests | Rust golden tests | Rust crates | Python modules | Runtime deps | `fennec-rs` binary |
+| Python tests | Rust tests | Rust crates | Python modules | Runtime deps | `fennec-rs` binary |
 |:---:|:---:|:---:|:---:|:---:|:---:|
-| 237 in 9 files | 22 in 5 crates | 6 | 16 | 4 | ≈ 1.9 MB |
+| 251 in 10 files | 53 in 6 crates | 6 | 16 | 4 | ≈ 1.9 MB |
 
-Counts taken from `tests/` and `src/*/tests/`. Binary size measured from
+Counts measured on 2026-11-15 from `tests/` (251 collected, 1 skipped) and `src/`. Binary size measured from
 `fennec-cli/target/release/fennec-rs.exe` (Windows x64 `cargo build --release --offline`, 1,897,180 bytes at 1.0.0).
 
 One reference implementation for the desktop, coding-agent and JetBrains apps. Pure logic is
-also ported to a seven-crate Rust workspace that the Python side can delegate to.
+also ported to a six-crate Rust workspace that the Python side can delegate to.
 
 ## Architecture
 
@@ -174,24 +174,25 @@ writes the desktop wizard's keys — never a secret: `engine_root`, `suite_root`
 
 ```bash
 fennec setup                                       # prompts with detected defaults
-fennec setup --yes --engine-root /opt/colibri      # noninteractive
+fennec setup --yes --engine-root /opt/fennec       # noninteractive
 fennec setup --dry-run --json                      # print the config, write nothing
 fennec setup --yes --install-deps                  # pip install missing core deps first
 ```
 
-`backend` is one of `auto`, `vulkan`, `metal`, `cpu`; `policy` one of `quality`, `balanced`,
-`experimental-fast`. Models are optional.
+`backend` is one of `auto`, `cuda`, `vulkan`, `metal`, `cpu`; `policy` one of `quality`,
+`balanced`, `experimental-fast`. Models are optional.
 
-> [!WARNING]
-> The wizard still validates a **Colibri-style** checkout (`c/coli`, `c/openai_server.py`)
-> while `engine.py` prefers a native Fennec binary. Point it at a Fennec-only tree today and
-> it reports the engine as missing even though the runtime would launch it fine.
+> [!NOTE]
+> `--engine-root` accepts either a native Fennec checkout (a `fennec` binary under
+> `target/release`, `target/debug` or the root) or a Colibri checkout carrying
+> `c/coli` and `c/openai_server.py`. The engine runtime prefers the native binary;
+> `c/coli` is the legacy fallback.
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v     # 237 checks across 9 files
-cd src && cargo test --offline             # 22 golden tests across 5 crates
+python -m unittest discover -s tests -v     # 251 tests across 10 files, 1 skipped
+cd src && cargo test --offline             # 53 tests across the 6 crates
 ```
 
 Everything is hermetic: no engine, no network, no model. The tokenizer/economy bridge is
