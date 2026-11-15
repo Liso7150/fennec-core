@@ -33,6 +33,21 @@ fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// `str(Path(raw).expanduser())`: the report carries the path the way pathlib
+/// renders it, so the OS separator, one separator between parts, no `.` parts
+/// and no trailing one. Rebuilding from `components()` is what drops those,
+/// because a `PathBuf` join already knows not to repeat a root separator.
+fn pathlib_str(path: &Path) -> String {
+    let mut rebuilt = PathBuf::new();
+    for part in path.components() {
+        rebuilt.push(part.as_os_str());
+    }
+    if rebuilt.as_os_str().is_empty() {
+        return ".".to_string();
+    }
+    rebuilt.to_string_lossy().into_owned()
+}
+
 fn dir_bytes(path: &Path) -> i64 {
     let mut total = 0i64;
     let stack = &mut vec![path.to_path_buf()];
@@ -259,7 +274,7 @@ pub fn plan_with(model_dir: &str, ctx: i64, kv_bytes: Option<i64>, vram_bytes: O
     let free = disk_free(if is_dir { &path } else { path.parent().unwrap_or(&path) });
 
     let mut report = Map::new();
-    report.insert("model".to_string(), Value::String(path.to_string_lossy().into_owned()));
+    report.insert("model".to_string(), Value::String(pathlib_str(&path)));
     report.insert("ctx".to_string(), Value::Number(Number::from(ctx)));
     report.insert("weights_bytes".to_string(), Value::Number(Number::from(weights)));
     report.insert("kv_bytes_per_token".to_string(), optional(per_token));
@@ -302,7 +317,9 @@ pub fn human(report: &Value) -> Vec<String> {
         format!("RAM free     {}", gb(field("ram_available_bytes"))),
         format!("weights fit  {}", text("weights_fit")),
         format!("KV fits      {}", match report.get("kv_fits") {
-            Some(Value::Bool(flag)) => flag.to_string(),
+            // `str(bool)` in Python is `True`/`False`, and `str(None)` is `None`.
+            Some(Value::Bool(true)) => "True".to_string(),
+            Some(Value::Bool(false)) => "False".to_string(),
             _ => "None".to_string(),
         }),
     ];
