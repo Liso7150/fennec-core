@@ -2,7 +2,8 @@
 //! `fennec-environment-setup/repos.json`. The apps never hardcode a repo list —
 //! `account`, `suite_root`, `engine_root`, `models_root` and the repos with
 //! their branches all come from that file, so install/update assembles the
-//! pieces and every run resolves them again. Mirrors `fennec_cli.suite_root()`.
+//! pieces and every run resolves them again. The CLI (`fennec-cli`) resolves the
+//! same layout through these functions instead of carrying its own copy.
 //!
 //! Every rule here is a pure function of an injected `Environ` plus a home, and
 //! the environment-reading functions are thin wrappers over them. That is the
@@ -37,10 +38,10 @@ pub struct Suite {
 /// own map, so a consumer passes what it has without converting.
 pub type Environ = HashMap<String, String>;
 
-/// What a non-absolute configured value resolves against. The Python canonical
-/// disagrees per entry point - `fennec_cli` leaves it alone, `config.py` resolves
-/// it against the config file's directory - so the rule belongs to the caller and
-/// the resolution lives here once.
+/// What a non-absolute configured value resolves against. The Python it was
+/// ported from disagreed per entry point - the launcher left the value alone,
+/// `config.py` resolved it against the config file's directory - so the rule
+/// belongs to the caller and the resolution lives here once.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Relative {
     /// Left as written: resolves against the process working directory.
@@ -157,9 +158,8 @@ fn config_map_in(environ: &Environ, home: &Path, relative: Relative) -> Map<Stri
     }
 }
 
-/// The suite root the shared config alone defines, in the order
-/// `fennec_cli.suite_root()` uses: `FENNEC_SUITE`, then the config's
-/// `suite_root`, then `~/Fennec-Suite`.
+/// The suite root the shared config alone defines, in the order the launcher
+/// uses: `FENNEC_SUITE`, then the config's `suite_root`, then `~/Fennec-Suite`.
 pub fn suite_root_in(
     environ: &Environ,
     config: &Map<String, Value>,
@@ -175,7 +175,7 @@ pub fn suite_root_in(
     }
 }
 
-/// Candidate suite roots, in the priority `fennec_cli.suite_root()` uses. The
+/// Candidate suite roots, in the priority the launcher uses. The
 /// manifest gets its own step: the installer can point it at a different root
 /// than the config does.
 pub fn roots_in(environ: &Environ, home: &Path) -> Vec<PathBuf> {
