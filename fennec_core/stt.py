@@ -20,9 +20,8 @@ MAX_BYTES = 16 << 20
 
 
 def knob(name, default):
-    """FENNEC_<NAME> is the spelling this suite documents; COLI_<NAME> is the
-    alias a Colibri-era setup still uses."""
-    return os.environ.get("FENNEC_" + name) or os.environ.get("COLI_" + name) or default
+    """The engine knobs are spelled `FENNEC_<NAME>`."""
+    return os.environ.get("FENNEC_" + name) or default
 
 
 DEFAULT_MODEL = knob("STT_MODEL", "base.en")

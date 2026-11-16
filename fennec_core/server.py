@@ -349,8 +349,7 @@ def _ag_ui_max_steps(value) -> int:
 def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
     client = engine_client or get_engine()
     agent_outlets = Outlets(config)
-    extra = (os.environ.get("FENNEC_ALLOWED_HOSTS")
-             or os.environ.get("COLI_ALLOWED_HOSTS") or "")
+    extra = os.environ.get("FENNEC_ALLOWED_HOSTS") or ""
     hosts = set(LOOPBACK_HOSTS) | {h.strip().lower() for h in extra.split(",") if h.strip()}
     if allowed_hosts:
         hosts |= {h.strip().lower() for h in allowed_hosts if h.strip()}
@@ -459,11 +458,11 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
 
     @app.post("/api/engine/start")
     def engine_start():
-        try:
-            if client.is_running():
-                return {"running": True, "already": True}
-        except EngineError:
-            pass
+        # Queues the warm-up and answers at once. `client.start` re-checks "already
+        # running" and "already starting" under its own lock, so probing /health
+        # here first only spent that probe's 2 s timeout inside the request - and a
+        # client that waits 2 s for the answer gives up on a start that already
+        # landed, which is what the desktop measured twice on a cold engine.
         import threading
         threading.Thread(target=client.start, kwargs={"wait_s": 240}, daemon=True).start()
         return {"starting": True}

@@ -96,15 +96,16 @@ def vulkan_loader_present(exists=None, system=None, environ=None):
     return any(probe(candidate) for candidate in VULKAN_LINUX)
 
 
-def mirror(env, key, value):
-    """Set one engine knob under both spellings.
+def pin(env, key, value, *, legacy):
+    """Set one engine knob under the names this child actually reads.
 
-    `FENNEC_*` is the name this suite documents; `COLI_*` is what a Colibri
-    checkout still reads, and a user who has not built the Rust engine keeps
-    their existing setup working.
+    `FENNEC_*` is the only spelling the native binary reads. A Colibri
+    checkout - the fallback on a machine that has not built the Rust engine -
+    predates that name, so it is served the name it was written against too.
     """
     env["FENNEC_" + key] = value
-    env["COLI_" + key] = value
+    if legacy:
+        env["COLI_" + key] = value
 
 
 def native_fennec(root):
@@ -186,35 +187,38 @@ class Engine:
 
     def _engine_env(self):
         env = dict(os.environ)
+        # Scrubbed under both names: a flag left in the caller's shell would
+        # decide the child's backend for it, and a secret must not reach a
+        # sidecar that has no use for it.
         for key in ("FENNEC_APP_TOKEN", "FENNEC_API_KEY", "COLI_API_KEY",
                     "FENNEC_VULKAN", "FENNEC_METAL", "FENNEC_CUDA",
                     "COLI_VULKAN", "COLI_METAL", "COLI_CUDA", "COLI_VK_DEV2"):
             env.pop(key, None)
         env.update(HF_HOME=str(self.config.cache_root / "huggingface"))
-        mirror(env, "MODEL", self.config.model)
-        mirror(env, "API_KEY", self.config.api_key)
-        # Both engines read these flags, but not with the same meaning. Fennec
-        # resolves an unset backend by vendor (NVIDIA=cuda, Apple=metal, else
-        # vulkan) and an env flag outranks that policy, so pinning the Vulkan
-        # flag would force an NVIDIA card off its CUDA tier. Colibri has no such
-        # policy: without the flag it logs "COLI_VULKAN is not set: the Vulkan
-        # device stays unused" and runs CPU + RAM + SSD only.
+        legacy = native_fennec(getattr(self.config, "engine_root", None)) is None
+        pin(env, "MODEL", self.config.model, legacy=legacy)
+        pin(env, "API_KEY", self.config.api_key, legacy=legacy)
+        # The two engines read these flags, but not with the same meaning. The
+        # native one resolves an unset backend by vendor (NVIDIA=cuda,
+        # Apple=metal, else vulkan) and an env flag outranks that policy, so
+        # pinning the Vulkan flag would force an NVIDIA card off its CUDA tier.
+        # Colibri has no such policy: without the flag it logs "COLI_VULKAN is
+        # not set: the Vulkan device stays unused" and runs CPU + RAM + SSD only.
         if self.config.backend == "auto":
-            if native_fennec(getattr(self.config, "engine_root", None)) is None \
-                    and vulkan_loader_present():
-                mirror(env, "VULKAN", "1")
+            if legacy and vulkan_loader_present():
+                pin(env, "VULKAN", "1", legacy=True)
                 # 4 GB of host expert pool costs ~6 % decode against Colibri's
                 # 13 GB default (13.95 vs 14.88 tok/s, 2026-11-10) and gives back
                 # ~9 GB of RAM; 2 GB collapses to 6.27 tok/s. Fennec reads the
                 # same variable as its whole host expert budget, where 4 GB
                 # starves residency, so it keeps its own default.
                 if not any(k in env for k in ("FENNEC_VK_TIER_HOST_GB", "COLI_VK_TIER_HOST_GB")):
-                    mirror(env, "VK_TIER_HOST_GB", "4")
+                    pin(env, "VK_TIER_HOST_GB", "4", legacy=True)
         else:
             for name in ("VULKAN", "METAL", "CUDA"):
-                mirror(env, name, "0")
+                pin(env, name, "0", legacy=legacy)
             if self.config.backend != "cpu":
-                mirror(env, self.config.backend.upper(), "1")
+                pin(env, self.config.backend.upper(), "1", legacy=legacy)
         return env
 
     def _engine_binary(self):
@@ -324,7 +328,7 @@ class Engine:
             self._stop_owned(self._stt_process)
             self._stt_process = None
 
-    def _coli(self, args, timeout=120):
+    def _diagnostic(self, args, timeout=120):
         command, options = self._command(args)
         with tempfile.TemporaryFile() as output:
             try:
@@ -337,10 +341,10 @@ class Engine:
             return {"exit": result.returncode, "out": self._redact(output.read().decode("utf-8", "replace"))}
 
     def plan(self):
-        return self._coli(["plan", *self._model_args()])
+        return self._diagnostic(["plan", *self._model_args()])
 
     def doctor(self):
-        return self._coli(["doctor"] + (self._model_args() if self.config.model else []))
+        return self._diagnostic(["doctor"] + (self._model_args() if self.config.model else []))
 
     def status(self):
         return {"running": self.is_running(), "owned": self._owns_engine(), "engine_url": self.config.engine_url}

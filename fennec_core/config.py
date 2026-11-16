@@ -130,8 +130,8 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
     if not valid:
         raise ConfigError("engine_url must be an HTTP(S) origin without credentials, path or query")
     values["engine_url"] = values["engine_url"].rstrip("/")
-    key = env.get("FENNEC_API_KEY") or env.get("COLI_API_KEY")
+    key = env.get("FENNEC_API_KEY")
     if not key and not is_loopback(url.hostname):
-        raise ConfigError("A non-loopback engine requires FENNEC_API_KEY or COLI_API_KEY")
+        raise ConfigError("A non-loopback engine requires FENNEC_API_KEY")
     values["api_key"] = key or "local"
     return Config(**values)
