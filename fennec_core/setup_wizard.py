@@ -33,7 +33,7 @@ INPUT_KEYS = {
     "root", "engine_root", "suite_root", "models_root", "cache_root", "python",
     "model", "engine_url", "backend", "ctx", "policy",
 }
-BACKENDS = ("auto", "cuda", "vulkan", "metal", "cpu")
+BACKENDS = ("auto", "cuda", "vulkan", "metal", "ort", "cpu")
 POLICIES = ("quality", "balanced", "experimental-fast")
 ENGINE_FILES = ("c/coli", "c/openai_server.py")
 # The same three places the desktop's runtimePaths probes for the native engine.

@@ -1,4 +1,4 @@
-![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2024, 251 Python tests, 6 Rust crates, 53 Rust tests, MIT license.](docs/hero.png)
+![Fennec Core 2.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2024, 251 Python tests, 6 Rust crates, 53 Rust tests, MIT license.](docs/hero.png)
 
 ---
 
