@@ -10,3 +10,11 @@ release/
 *.egg-info/
 .pytest_cache/
 src/target/
+
+# Auto-update artifacts
+*.old
+*.new
+*.exe.old
+*.bin.old
+fennec-core-*.exe
+fennec-core-*.bin
