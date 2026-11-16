@@ -126,6 +126,17 @@ def compact(messages, *, budget_chars=DEFAULT_BUDGET_CHARS, result_chars=DEFAULT
         message["content"] = elide(content, target)
         total = sum(_size(item) for item in payload)
 
-    stats = {"chars_before": before, "chars_after": total, "elided": elided,
-             "deduped": deduped, "budget_chars": budget_chars, "result_chars": result_chars}
+    stats = {
+        "chars_before": before,
+        "chars_after": total,
+        "elided": elided,
+        "deduped": deduped,
+        "budget_chars": budget_chars,
+        "result_chars": result_chars,
+        "files_summarized": 0,
+        "helper_chats_summarized": 0,
+        "screenshots_summarized": 0,
+        "token_savings": 0,
+        "webpages_extracted": 0,
+    }
     return payload, stats
