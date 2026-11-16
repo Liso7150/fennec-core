@@ -1,4 +1,4 @@
-![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2021, 251 Python tests, 6 Rust crates, 53 Rust tests, MIT license.](docs/hero.png)
+![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2024, 251 Python tests, 6 Rust crates, 53 Rust tests, MIT license.](docs/hero.png)
 
 ---
 
@@ -109,7 +109,7 @@ read-only by default; the speech sidecar (faster-whisper, CPU) sits behind `POST
 
 ## Rust workspace
 
-`src/` holds six crates, all at version 1.0.0, edition 2021. They port pure logic —
+`src/` holds six crates, all at version 1.0.0, edition 2024. They port pure logic —
 no inference, no model weights. Each is the only implementation of its feature: the desktop
 app, the JetBrains sidecar and the CLI path-depend on these, they do not copy them.
 

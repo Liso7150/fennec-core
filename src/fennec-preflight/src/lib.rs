@@ -72,7 +72,7 @@ pub fn disk_free(path: &Path) -> Option<i64> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
-        extern "system" {
+        unsafe extern "system" {
             fn GetDiskFreeSpaceExW(directory_name: *const u16,
                                    free_bytes_available_to_caller: *mut u64,
                                    total_number_of_bytes: *mut u64,
@@ -203,7 +203,7 @@ pub fn ram_available() -> Option<i64> {
             ull_avail_virtual: u64,
             ull_avail_extended_virtual: u64,
         }
-        extern "system" {
+        unsafe extern "system" {
             fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
         }
         let mut status = unsafe { std::mem::zeroed::<MemoryStatusEx>() };
