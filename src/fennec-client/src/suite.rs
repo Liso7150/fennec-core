@@ -105,11 +105,24 @@ pub fn expand_in(value: &str, home: &Path, relative: Relative) -> PathBuf {
     } else {
         PathBuf::from(value)
     };
-    if relative == Relative::Home && !expanded.is_absolute() {
+    if relative == Relative::Home && !is_absolute_cross_platform(&expanded) {
         home.join(expanded)
     } else {
         expanded
     }
+}
+
+/// Check if a path is absolute on any platform, including Windows drive letters on Unix.
+fn is_absolute_cross_platform(path: &Path) -> bool {
+    if path.is_absolute() {
+        return true;
+    }
+    // Check for Windows drive letter pattern (e.g., "C:/", "D:\")
+    let s = path.to_string_lossy();
+    s.len() >= 3
+        && s.as_bytes()[0].is_ascii_alphabetic()
+        && s.as_bytes()[1] == b':'
+        && (s.as_bytes()[2] == b'/' || s.as_bytes()[2] == b'\\')
 }
 
 pub fn expand(p: &str) -> PathBuf {
@@ -437,7 +450,12 @@ mod tests {
     fn discovery_never_panics_without_a_suite() {
         let s = Suite { root: PathBuf::from(if cfg!(windows) { "Z:/nope" } else { "/nope" }), ..Default::default() };
         assert!(s.workspaces().is_empty());
-        assert!(s.engine_binary().extension().is_some());
+        // On Windows the binary has .exe extension; on Unix it doesn't
+        if cfg!(windows) {
+            assert!(s.engine_binary().extension().is_some());
+        } else {
+            assert!(s.engine_binary().extension().is_none());
+        }
         let _ = discover();
     }
 
