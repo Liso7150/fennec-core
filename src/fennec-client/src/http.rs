@@ -3,7 +3,7 @@
 //! honours `Connection: close` but not before the keep-alive timeout), so
 //! reading to end would wait out the whole timeout on every request.
 use serde_json::Value;
-use std::io::Read;
+use std::io::{BufRead, Read};
 use std::io::Write;
 use std::net::TcpStream;
 use std::time::Duration;
@@ -113,6 +113,51 @@ pub fn post_json(base: &str, route: &str, headers: &[(&str, &str)], body: &Value
 
 pub fn bearer(key: &str) -> String {
     format!("Bearer {key}")
+}
+
+/// Read an SSE stream from `route`, calling `on_event` for each `data:` line.
+/// Blocks the caller's thread until the socket closes or `cancel` flips.
+/// Used by the coding-agent's `/api/events` endpoint.
+pub fn read_sse(
+    base: &str,
+    route: &str,
+    headers: &[(&str, &str)],
+    cancel: &std::sync::atomic::AtomicBool,
+    mut on_event: impl FnMut(&str),
+) -> Result<(), String> {
+    let (host, _) = split_base(base);
+    let mut s = connect(base, std::time::Duration::from_secs(300))?;
+    write_request(&mut s, &host, "GET", route, headers, None)?;
+    let mut reader = std::io::BufReader::new(s);
+    let mut line = String::new();
+    // Skip HTTP headers
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+            return Err("closed before headers ended".into());
+        }
+        if line.trim().is_empty() {
+            break;
+        }
+    }
+    // Read SSE frames
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
+        line.clear();
+        let n = reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break; // socket closed
+        }
+        if let Some(data) = line.trim().strip_prefix("data: ") {
+            if data.trim() == "[DONE]" {
+                break;
+            }
+            on_event(data.trim());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

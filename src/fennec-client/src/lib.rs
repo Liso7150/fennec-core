@@ -5,11 +5,13 @@
 //! instead of re-implementing routes, headers, SSE framing or cancellation.
 //! std-only: no third-party HTTP, so offline builds keep working.
 pub mod agent;
+pub mod coding_agent;
 pub mod engine;
 pub mod git;
 pub mod http;
 pub mod suite;
 
 pub use agent::{Core, Outlet, Outlets, OUTLET_RUN_TIMEOUT};
+pub use coding_agent::{CodingAgentClient, AgentTask, TaskMessage, SseEvent, MessageContent};
 pub use engine::{ChatDelta, Engine};
 pub use suite::{Repo, Suite};
