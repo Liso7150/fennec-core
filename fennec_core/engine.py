@@ -79,33 +79,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None  # Never forward credentials to another origin.
 
 
-VULKAN_LINUX = ("/usr/lib/x86_64-linux-gnu/libvulkan.so.1", "/usr/lib64/libvulkan.so.1",
-                 "/usr/lib/libvulkan.so.1")
-
-
-def vulkan_loader_present(exists=None, system=None, environ=None):
-    """A Vulkan loader on disk is what makes `*_VULKAN=1` startable."""
-    probe = os.path.exists if exists is None else exists
-    name = platform.system() if system is None else system
-    env = os.environ if environ is None else environ
-    if name == "Darwin":
-        return False
-    if name == "Windows":
-        root = env.get("SystemRoot") or env.get("SYSTEMROOT") or "C:\\Windows"
-        return probe(os.path.join(root, "System32", "vulkan-1.dll"))
-    return any(probe(candidate) for candidate in VULKAN_LINUX)
-
-
-def pin(env, key, value, *, legacy):
-    """Set one engine knob under the names this child actually reads.
-
-    `FENNEC_*` is the only spelling the native binary reads. A Colibri
-    checkout - the fallback on a machine that has not built the Rust engine -
-    predates that name, so it is served the name it was written against too.
-    """
+def pin(env, key, value):
+    """Set one engine knob under the name the native binary reads."""
     env["FENNEC_" + key] = value
-    if legacy:
-        env["COLI_" + key] = value
 
 
 def native_fennec(root):
@@ -187,65 +163,39 @@ class Engine:
 
     def _engine_env(self):
         env = dict(os.environ)
-        # Scrubbed under both names: a flag left in the caller's shell would
-        # decide the child's backend for it, and a secret must not reach a
-        # sidecar that has no use for it.
-        for key in ("FENNEC_APP_TOKEN", "FENNEC_API_KEY", "COLI_API_KEY",
-                    "FENNEC_VULKAN", "FENNEC_METAL", "FENNEC_CUDA",
-                    "COLI_VULKAN", "COLI_METAL", "COLI_CUDA", "COLI_VK_DEV2"):
+        # Scrubbed first: a flag left in the caller's shell would decide the
+        # child's backend for it, and a secret must not reach a child that has
+        # no use for it.
+        for key in ("FENNEC_APP_TOKEN", "FENNEC_API_KEY",
+                    "FENNEC_VULKAN", "FENNEC_METAL", "FENNEC_CUDA"):
             env.pop(key, None)
         env.update(HF_HOME=str(self.config.cache_root / "huggingface"))
-        legacy = native_fennec(getattr(self.config, "engine_root", None)) is None
-        pin(env, "MODEL", self.config.model, legacy=legacy)
-        pin(env, "API_KEY", self.config.api_key, legacy=legacy)
-        # The two engines read these flags, but not with the same meaning. The
-        # native one resolves an unset backend by vendor (NVIDIA=cuda,
-        # Apple=metal, else vulkan) and an env flag outranks that policy, so
-        # pinning the Vulkan flag would force an NVIDIA card off its CUDA tier.
-        # Colibri has no such policy: without the flag it logs "COLI_VULKAN is
-        # not set: the Vulkan device stays unused" and runs CPU + RAM + SSD only.
-        if self.config.backend == "auto":
-            if legacy and vulkan_loader_present():
-                pin(env, "VULKAN", "1", legacy=True)
-                # 4 GB of host expert pool costs ~6 % decode against Colibri's
-                # 13 GB default (13.95 vs 14.88 tok/s, 2026-11-10) and gives back
-                # ~9 GB of RAM; 2 GB collapses to 6.27 tok/s. Fennec reads the
-                # same variable as its whole host expert budget, where 4 GB
-                # starves residency, so it keeps its own default.
-                if not any(k in env for k in ("FENNEC_VK_TIER_HOST_GB", "COLI_VK_TIER_HOST_GB")):
-                    pin(env, "VK_TIER_HOST_GB", "4", legacy=True)
-        else:
+        pin(env, "MODEL", self.config.model)
+        pin(env, "API_KEY", self.config.api_key)
+        # An unset backend is the engine's own vendor policy (NVIDIA=cuda,
+        # Apple=metal, else vulkan); an env flag would outrank that policy and
+        # force an NVIDIA card off its CUDA tier, so "auto" pins nothing.
+        if self.config.backend != "auto":
             for name in ("VULKAN", "METAL", "CUDA"):
-                pin(env, name, "0", legacy=legacy)
+                pin(env, name, "0")
             if self.config.backend != "cpu":
-                pin(env, self.config.backend.upper(), "1", legacy=legacy)
+                pin(env, self.config.backend.upper(), "1")
         return env
 
     def _engine_binary(self):
-        """Fennec is a native Rust binary; Colibri was a Python launcher.
-
-        Fennec wins when both are installed: it is the engine this suite is
-        built around. A Colibri checkout still works for anyone who has not
-        built the Rust side, because the HTTP contract is identical.
-        """
-        root = self.config.engine_root
-        candidate = native_fennec(root)
-        if candidate is not None:
-            return candidate, "fennec"
-        launcher = root / "c" / "coli"
-        if launcher.is_file():
-            return launcher, "colibri"
-        raise EngineError(
-            "No engine found under engine_root: build Fennec "
-            "(cargo build --release) or point engine_root at an existing installation"
-        )
+        """The native Rust binary under engine_root, or an error."""
+        candidate = native_fennec(self.config.engine_root)
+        if candidate is None:
+            raise EngineError(
+                "No Fennec binary found under engine_root: build Fennec "
+                "(cargo build --release) or point engine_root at an existing installation"
+            )
+        return candidate
 
     def _command(self, args):
-        binary, kind = self._engine_binary()
-        python, options = spawn_options(self.config.python)
-        if kind == "fennec":
-            return [str(binary), *args], options
-        return [python, str(binary), *args], options
+        options = ({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt"
+                   else {"start_new_session": True})
+        return [str(self._engine_binary()), *args], options
 
     def _model_args(self):
         if not self.config.model or not Path(self.config.model).is_dir():

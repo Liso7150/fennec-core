@@ -632,11 +632,11 @@ class ConfigTests(unittest.TestCase):
                     load_config(path, environ={}, home=Path(tmp))
 
     def test_every_wizard_backend_loads(self):
-        """The wizard offers cuda, so the runtime schema has to accept it too."""
-        from fennec_core.config import BACKENDS
+        """Whatever the wizard offers has to load, so the two sets cannot drift."""
+        from fennec_core import setup_wizard as wizard
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
-            for backend in BACKENDS:
+            for backend in wizard.BACKENDS:
                 path.write_text(json.dumps({"backend": backend}), encoding="utf-8")
                 self.assertEqual(load_config(path, environ={}, home=Path(tmp)).backend, backend)
 
@@ -664,20 +664,20 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(Path(tmp) / "missing.json", environ={}, home=Path(tmp))
 
-    def test_engine_root_defaults_to_fennec_and_falls_back_to_colibri(self):
+    def test_engine_root_defaults_to_fennec(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            fennec, colibri = home / "Fennec", home / "Colibri"
+            fennec = home / "Fennec"
             self.assertEqual(load_config(environ={}, home=home).engine_root, fennec.resolve())
-            colibri.mkdir()
-            self.assertEqual(load_config(environ={}, home=home).engine_root, colibri.resolve())
+            # A Colibri checkout on disk is no longer an engine root.
+            (home / "Colibri").mkdir()
+            self.assertEqual(load_config(environ={}, home=home).engine_root, fennec.resolve())
             fennec.mkdir()
             self.assertEqual(load_config(environ={}, home=home).engine_root, fennec.resolve())
 
-    def test_an_explicit_engine_root_beats_the_fallback(self):
+    def test_an_explicit_engine_root_beats_the_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            (home / "Colibri").mkdir()
             path = home / "config.json"
             path.write_text(json.dumps({"engine_root": str(home / "elsewhere")}), encoding="utf-8")
             self.assertEqual(load_config(path, environ={}, home=home).engine_root,
@@ -688,72 +688,32 @@ class ConfigTests(unittest.TestCase):
 
 
 class EngineEnvironmentTests(unittest.TestCase):
-    def test_vulkan_loader_detection_per_platform(self):
-        from fennec_core import engine
-        self.assertTrue(engine.vulkan_loader_present(exists=lambda p: p.endswith("vulkan-1.dll"),
-                                                     system="Windows", environ={"SystemRoot": "C:/Windows"}))
-        self.assertFalse(engine.vulkan_loader_present(exists=lambda p: False, system="Windows", environ={}))
-        self.assertFalse(engine.vulkan_loader_present(exists=lambda p: True, system="Darwin", environ={}))
-        self.assertTrue(engine.vulkan_loader_present(exists=lambda p: p.endswith("libvulkan.so.1"),
-                                                     system="Linux", environ={}))
-
-    def test_auto_requests_the_gpu_and_cpu_switches_it_off(self):
+    def test_explicit_backends_pin_their_flag_and_auto_pins_nothing(self):
         from types import SimpleNamespace
         from fennec_core import engine
         stub = SimpleNamespace(config=SimpleNamespace(backend="auto", cache_root=Path("C:/cache"),
                                                       model="m", api_key="local"))
-        with mock.patch.object(engine, "vulkan_loader_present", return_value=True):
-            env = engine.Engine._engine_env(stub)
-            # The launcher writes both spellings: Fennec reads its own name, a
-            # Colibri checkout still reads COLI_*.
-            self.assertEqual(env.get("FENNEC_VULKAN"), "1")
-            self.assertEqual(env.get("COLI_VULKAN"), "1")
-            self.assertEqual(env.get("FENNEC_VK_TIER_HOST_GB"), "4")
-            self.assertEqual(env.get("COLI_VK_TIER_HOST_GB"), "4")
-        for spelling in ("COLI_VK_TIER_HOST_GB", "FENNEC_VK_TIER_HOST_GB"):
-            with mock.patch.object(engine, "vulkan_loader_present", return_value=True), \
-                    mock.patch.dict(os.environ, {spelling: "9"}):
-                env = engine.Engine._engine_env(stub)
-                self.assertEqual(env.get(spelling), "9", f"{spelling} is the user's own setting")
-                self.assertIsNone(env.get("FENNEC_VK_TIER_HOST_GB" if spelling.startswith("COLI")
-                                           else "COLI_VK_TIER_HOST_GB"),
-                                  "a set knob is never pinned to the 4 GB default")
-        with mock.patch.object(engine, "vulkan_loader_present", return_value=False):
-            env = engine.Engine._engine_env(stub)
-            for spelling in ("FENNEC_VULKAN", "COLI_VULKAN"):
-                self.assertNotIn(spelling, env, f"{spelling} leaked in from the parent env")
+        env = engine.Engine._engine_env(stub)
+        # "auto" is the engine's own vendor policy (NVIDIA=cuda, Apple=metal,
+        # else vulkan); a pin would outrank it.
+        for name in ("FENNEC_VULKAN", "FENNEC_METAL", "FENNEC_CUDA"):
+            self.assertNotIn(name, env, f"{name} would outrank vendor policy")
         stub.config.backend = "cpu"
         env = engine.Engine._engine_env(stub)
         self.assertEqual(env.get("FENNEC_VULKAN"), "0")
-        self.assertEqual(env.get("COLI_VULKAN"), "0")
-
-    def test_auto_leaves_a_native_fennec_engine_to_its_vendor_policy(self):
-        """Fennec picks CUDA on NVIDIA itself; an env pin would outrank that."""
-        from types import SimpleNamespace
-        from fennec_core import engine
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            stub = SimpleNamespace(config=SimpleNamespace(
-                backend="auto", cache_root=root / "cache", model="m",
-                api_key="local", engine_root=root))
-            with mock.patch.object(engine, "vulkan_loader_present", return_value=True):
-                env = engine.Engine._engine_env(stub)
-                self.assertEqual(env.get("COLI_VULKAN"), "1", "no binary yet: Colibri pinning")
-                self.assertEqual(env.get("FENNEC_VULKAN"), "1")
-                self.assertEqual(env.get("COLI_VK_TIER_HOST_GB"), "4")
-                self.assertEqual(env.get("FENNEC_VK_TIER_HOST_GB"), "4")
-                release = root / "target" / "release"
-                release.mkdir(parents=True)
-                (release / ("fennec.exe" if os.name == "nt" else "fennec")).write_bytes(b"")
-                env = engine.Engine._engine_env(stub)
-                for spelling in ("FENNEC_VULKAN", "COLI_VULKAN"):
-                    self.assertNotIn(spelling, env, f"{spelling} would outrank vendor policy")
-                self.assertNotIn("COLI_VK_TIER_HOST_GB", env)
-                self.assertNotIn("FENNEC_VK_TIER_HOST_GB", env)
+        self.assertEqual(env.get("FENNEC_CUDA"), "0")
+        stub.config.backend = "vulkan"
+        env = engine.Engine._engine_env(stub)
+        self.assertEqual(env.get("FENNEC_VULKAN"), "1")
+        self.assertEqual(env.get("FENNEC_CUDA"), "0")
+        stub.config.backend = "cuda"
+        env = engine.Engine._engine_env(stub)
+        self.assertEqual(env.get("FENNEC_CUDA"), "1")
+        self.assertEqual(env.get("FENNEC_VULKAN"), "0")
 
 
 class EngineBinaryTests(unittest.TestCase):
-    """The suite spawns Fennec, a native binary, not Colibri's Python launcher."""
+    """The suite spawns the native Fennec binary and nothing else."""
 
     def setUp(self):
         from fennec_core import engine
@@ -773,24 +733,19 @@ class EngineBinaryTests(unittest.TestCase):
         p.write_text("", encoding="utf-8")
         return p
 
-    def test_fennec_is_preferred_over_an_installed_colibri(self):
+    def test_the_release_binary_is_found_despite_unrelated_files(self):
         binary = self.write("target/release/fennec.exe" if os.name == "nt" else "target/release/fennec")
-        self.write("c/coli")
-        found, kind = self.engine.Engine._engine_binary(self.stub)
-        self.assertEqual(kind, "fennec")
-        self.assertEqual(found, binary)
+        self.write("c/coli")  # leftover from the retired engine; it is not an engine
+        self.assertEqual(self.engine.Engine._engine_binary(self.stub), binary)
 
     def test_a_debug_build_is_found_when_release_is_absent(self):
         binary = self.write("target/debug/fennec.exe" if os.name == "nt" else "target/debug/fennec")
-        found, kind = self.engine.Engine._engine_binary(self.stub)
-        self.assertEqual(kind, "fennec")
-        self.assertEqual(found, binary)
+        self.assertEqual(self.engine.Engine._engine_binary(self.stub), binary)
 
-    def test_colibri_remains_a_fallback(self):
-        launcher = self.write("c/coli")
-        found, kind = self.engine.Engine._engine_binary(self.stub)
-        self.assertEqual(kind, "colibri")
-        self.assertEqual(found, launcher)
+    def test_a_colibri_launcher_is_not_an_engine(self):
+        self.write("c/coli")
+        with self.assertRaises(self.engine.EngineError):
+            self.engine.Engine._engine_binary(self.stub)
 
     def test_no_engine_is_an_error_not_a_silent_success(self):
         with self.assertRaises(self.engine.EngineError):
@@ -802,13 +757,6 @@ class EngineBinaryTests(unittest.TestCase):
         self.assertEqual(command[0], str(binary))
         self.assertNotIn("python", command[0].lower())
         self.assertEqual(command[1:], ["serve", "--auto-tier"])
-
-    def test_the_colibri_launcher_still_runs_under_python(self):
-        launcher = self.write("c/coli")
-        command, _ = self.engine.Engine._command(self.stub, ["serve"])
-        self.assertEqual(command[1], str(launcher))
-        self.assertEqual(command[2:], ["serve"])
-        self.assertIn("python", command[0].lower())
 
 
 class _Scripted(FakeEngine):
@@ -1006,6 +954,64 @@ class ApprovalTests(ClientCase):
         self.assertEqual(self.answer(sid, ask["approval_id"], "allow_once").status_code, 200)
         self.settle(sid)
         self.assertEqual(row()["pending"], 0)
+
+
+class TextToolCallTests(ApprovalTests):
+    """The engine has no function calling, so a compliant turn arrives as a JSON
+    object written into the content. The loop must honor the same shape the real
+    model emitted (tool/source/content, ``source`` aliasing ``path``) and keep
+    quoted or foreign JSON as prose."""
+
+    def test_the_json_the_model_actually_writes_executes(self):
+        reply = json.dumps({"tool": "write_file",
+                            "source": str(self.root / "note.md"),
+                            "content": "hi"}, indent=2)
+        sid = self.start([{"role": "assistant", "content": reply},
+                          {"role": "assistant", "content": "done"}], allow_write=True)
+        state = self.settle(sid)
+        self.assertEqual(state["status"], "done")
+        self.assertEqual((self.root / "note.md").read_text(encoding="utf-8"), "hi")
+        self.assertTrue([step for step in state["steps"]
+                         if step["type"] == "tool" and step["ok"]])
+
+    def test_a_text_call_asks_for_approval_like_a_native_one(self):
+        sid = self.start([{"role": "assistant",
+                           "content": json.dumps({"tool": "write_file", "path": "note.md",
+                                                  "content": "hi"})},
+                          {"role": "assistant", "content": "done"}],
+                         require_approval=True)
+        ask = self.ask(sid)
+        self.assertEqual(ask["name"], "write_file")
+        self.assertEqual(ask["args"], {"path": "note.md", "content": "hi"})
+        self.answer(sid, ask["approval_id"], "allow_once")
+        state = self.settle(sid)
+        self.assertEqual((self.root / "note.md").read_text(encoding="utf-8"), "hi")
+
+    def test_prose_json_and_foreign_keys_stay_prose(self):
+        cases = [{"tool": "deploy", "target": "prod"},
+                 {"tool": "write_file", "path": "note.md", "content": "hi", "force": True},
+                 "I would use {\"tool\": \"write_file\"} here but this is an example"]
+        for content in cases:
+            with self.subTest(content=str(content)[:40]):
+                sid = self.start([{"role": "assistant",
+                                   "content": content if isinstance(content, str)
+                                   else json.dumps(content)},
+                                  {"role": "assistant", "content": "done"}],
+                                 allow_write=True)
+                state = self.settle(sid)
+                self.assertEqual(state["status"], "done")
+                self.assertFalse((self.root / "note.md").exists())
+                self.assertEqual([s["type"] for s in state["steps"]].count("tool"), 0)
+
+    def test_a_fenced_call_inside_prose_still_executes(self):
+        reply = ("Reading the workspace first.\n```json\n"
+                 + json.dumps({"name": "write_file", "path": "note.md", "content": "hi"})
+                 + "\n```\nThen writing the note.")
+        sid = self.start([{"role": "assistant", "content": reply},
+                          {"role": "assistant", "content": "done"}], allow_write=True)
+        state = self.settle(sid)
+        self.assertEqual(state["status"], "done")
+        self.assertEqual((self.root / "note.md").read_text(encoding="utf-8"), "hi")
 
 
 if __name__ == "__main__":

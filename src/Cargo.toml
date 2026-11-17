@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "fennec-acp",
     "fennec-client",
-    "fennec-economy",
     "fennec-outlets",
     "fennec-preflight",
     "fennec-pyjson",
@@ -23,7 +22,6 @@ sha2 = "0.10"
 
 fennec-acp = { path = "fennec-acp" }
 fennec-client = { path = "fennec-client" }
-fennec-economy = { path = "fennec-economy" }
 fennec-outlets = { path = "fennec-outlets" }
 fennec-preflight = { path = "fennec-preflight" }
 fennec-pyjson = { path = "fennec-pyjson" }

@@ -14,9 +14,9 @@ from fennec_core import setup_wizard as wizard
 
 
 def make_engine(root: Path) -> Path:
-    (root / "c").mkdir(parents=True)
-    (root / "c" / "coli").write_text("", encoding="utf-8")
-    (root / "c" / "openai_server.py").write_text("", encoding="utf-8")
+    binary = root / "target" / "release" / ("fennec.exe" if os.name == "nt" else "fennec")
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"")
     return root
 
 
@@ -127,15 +127,21 @@ class ProbeTests(unittest.TestCase):
 
 
 class FilesystemTests(unittest.TestCase):
-    def test_engine_requires_both_files(self):
+    def test_an_engine_needs_a_built_native_binary(self):
         with tempfile.TemporaryDirectory() as directory:
             engine = Path(directory) / "engine"
             self.assertFalse(wizard.validate_engine(engine)["ok"])
-            (engine / "c").mkdir(parents=True)
-            (engine / "c" / "coli").write_text("", encoding="utf-8")
-            self.assertEqual(wizard.validate_engine(engine)["missing"], ["c/openai_server.py"])
-            (engine / "c" / "openai_server.py").write_text("", encoding="utf-8")
-            self.assertTrue(wizard.validate_engine(engine)["ok"])
+            self.assertFalse(wizard.validate_engine(engine)["is_directory"])
+            engine.mkdir()
+            self.assertTrue(wizard.validate_engine(engine)["is_directory"])
+            self.assertFalse(wizard.validate_engine(engine)["ok"])
+            (engine / "Cargo.toml").write_text("", encoding="utf-8")
+            self.assertFalse(wizard.validate_engine(engine)["ok"],
+                             "a source tree without a built binary is not an engine")
+            make_engine(engine)
+            report = wizard.validate_engine(engine)
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["kind"], "fennec")
 
     def test_scan_models_reports_size_and_readiness(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -24,18 +24,18 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .config import BACKENDS, POLICIES
+
 CONFIG_KEYS = {
     "engine_root", "suite_root", "models_root", "cache_root", "python", "model",
     "engine_url", "web_root", "workspace", "backend", "ctx", "policy",
+    "jev_root", "openbot_url",
 }
 SECRET_KEYS = {"api_key", "app_token", "token", "fennec_api_key", "fennec_app_token", "coli_api_key"}
 INPUT_KEYS = {
     "root", "engine_root", "suite_root", "models_root", "cache_root", "python",
-    "model", "engine_url", "backend", "ctx", "policy",
+    "model", "engine_url", "backend", "ctx", "policy", "jev_root", "openbot_url",
 }
-BACKENDS = ("auto", "cuda", "vulkan", "metal", "ort", "cpu")
-POLICIES = ("quality", "balanced", "experimental-fast")
-ENGINE_FILES = ("c/coli", "c/openai_server.py")
 # The same three places the desktop's runtimePaths probes for the native engine.
 FENNEC_DIRS = (("target", "release"), ("target", "debug"), ())
 CORE_DEPS = ("fastapi", "uvicorn", "psutil", "pydantic")
@@ -249,17 +249,14 @@ def fennec_binary(directory):
 def validate_engine(directory) -> dict:
     path = Path(str(directory or "")).expanduser()
     is_directory = path.is_dir()
-    missing = [relative for relative in ENGINE_FILES if not (path / relative).is_file()]
-    # A native Fennec checkout has no c/coli, and the runtime already prefers it,
-    # so rejecting it here would fail a folder the suite can actually run.
-    if is_directory and missing:
-        cli = fennec_binary(path)
-        if cli:
-            return {"ok": True, "path": str(path), "missing": [], "is_directory": True,
-                    "kind": "fennec", "cli": cli}
-    return {"ok": is_directory and not missing, "path": str(path),
-            "missing": missing if is_directory else list(ENGINE_FILES),
-            "is_directory": is_directory, "kind": "colibri"}
+    cli = fennec_binary(path)
+    if is_directory and cli:
+        return {"ok": True, "path": str(path), "missing": [], "is_directory": True,
+                "kind": "fennec", "cli": cli}
+    # Anything else - an unbuilt checkout, a foreign tree, a missing path -
+    # has the same remedy: build the engine or point engine_root elsewhere.
+    return {"ok": False, "path": str(path), "missing": [], "is_directory": is_directory,
+            "kind": "fennec"}
 
 
 def scan_models(directory, *, limit: int = 40) -> list[dict]:
@@ -409,6 +406,10 @@ def build_config(values, *, home=None, system=None) -> dict:
     }
     if input_values.get("python"):
         config["python"] = _abs(input_values["python"], home_path)
+    if str(input_values.get("jev_root") or "").strip():
+        config["jev_root"] = _abs(input_values["jev_root"], home_path)
+    if str(input_values.get("openbot_url") or "").strip():
+        config["openbot_url"] = str(input_values["openbot_url"]).strip()
     config["ctx"] = int(config["ctx"])
     return validate_config(config)
 
@@ -469,7 +470,7 @@ def resolve_values(args, existing: dict, *, home: Path, device: dict) -> dict:
     values = {
         "root": root,
         "engine_root": _pick_directory(args.engine_root, "engine_root",
-                                       [root_path / "engine", home / "Colibri"], existing),
+                                       [root_path / "engine", home / "Fennec"], existing),
         "suite_root": _pick_directory(args.suite_root, "suite_root",
                                       [root_path / "suite", home / "Fennec-Suite"], existing),
         "models_root": models_root,
@@ -487,6 +488,10 @@ def resolve_values(args, existing: dict, *, home: Path, device: dict) -> dict:
         if len(ready) == 1:
             model = ready[0]["path"]
     values["model"] = model
+    # The hub may have written the optional outlet keys; carry them through so a
+    # re-run of setup never silently drops them.
+    values["jev_root"] = existing.get("jev_root", "")
+    values["openbot_url"] = existing.get("openbot_url", "")
     return values
 
 
@@ -554,7 +559,7 @@ def main(argv=None, *, config=None, home=None, environ=None, input_fn=None,
         prog="fennec setup",
         description="Detect Python, the engine and models, then write the shared Fennec config.")
     parser.add_argument("--root", help="install root (default: ~/Fennec)")
-    parser.add_argument("--engine-root", help="Fennec checkout, or Colibri checkout containing c/coli")
+    parser.add_argument("--engine-root", help="Fennec checkout (a built binary or a Cargo.toml source tree)")
     parser.add_argument("--suite-root", help="Fennec suite checkout root")
     parser.add_argument("--models-root", help="model directory")
     parser.add_argument("--cache-root", help="cache directory")
@@ -606,8 +611,8 @@ def main(argv=None, *, config=None, home=None, environ=None, input_fn=None,
         return 1
     engine = validate_engine(config_values["engine_root"])
     if not engine["ok"]:
-        message = (f"engine checkout has neither a Fennec binary nor "
-                   f"c/coli and c/openai_server.py: {config_values['engine_root']}")
+        message = (f"engine checkout has no built Fennec binary (target/release): "
+                   f"{config_values['engine_root']} — run cargo build --release in it")
         if not args.dry_run:
             warn(f"fennec setup: {message}. Run fennec-installer or pass --engine-root.")
             return 2
@@ -664,7 +669,7 @@ def main(argv=None, *, config=None, home=None, environ=None, input_fn=None,
             out(f"Backed up the previous file to {result['backup']}")
         for line in _summary(config_values, python, dependencies, device):
             out(line)
-        out("Next: `fennec diagnose`, then `fennec serve --model <dir>`.")
+        out("Next: `fennec diagnose`, then `fennec serve --model <dir> --auto-tier`.")
         out(f"Upstream: {UPSTREAM} - neither is pulled by this command.")
     return 0
 

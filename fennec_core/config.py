@@ -15,7 +15,7 @@ class ConfigError(ValueError):
     pass
 
 
-BACKENDS = ("auto", "cuda", "vulkan", "metal", "cpu")
+BACKENDS = ("auto", "cuda", "vulkan", "metal", "ort", "cpu")
 POLICIES = ("quality", "balanced", "experimental-fast")
 
 
@@ -89,13 +89,6 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
     }.items():
         if variable in env:
             values[key] = env[variable]
-    # A Colibri checkout already on disk stays the fallback engine root, so an
-    # install that predates the Rust engine keeps launching. Mirrors
-    # fennec-environment-setup/fennec_setup/config.py:resolve_config.
-    if "engine_root" not in data and "FENNEC_HOME" not in env:
-        colibri = home / "Colibri"
-        if not (home / "Fennec").exists() and colibri.exists():
-            values["engine_root"] = str(colibri)
     for key, value in values.items():
         if key != "ctx" and (not isinstance(value, str)
                              or (not value.strip() and key not in {"model", "jev_root"})):

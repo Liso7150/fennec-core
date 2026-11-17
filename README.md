@@ -1,4 +1,4 @@
-![Fennec Core 2.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2024, 251 Python tests, 6 Rust crates, 53 Rust tests, MIT license.](docs/hero.png)
+![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2024, 251 Python tests, 6 Rust crates, 53 Rust tests, MIT license.](docs/hero.png)
 
 ---
 
@@ -109,18 +109,22 @@ read-only by default; the speech sidecar (faster-whisper, CPU) sits behind `POST
 
 ## Rust workspace
 
-`src/` holds six crates, all at version 1.0.0, edition 2024. They port pure logic —
+`src/` holds five crates, all at version 1.0.0, edition 2024. They port pure logic —
 no inference, no model weights. Each is the only implementation of its feature: the desktop
 app, the JetBrains sidecar and the CLI path-depend on these, they do not copy them.
 
 | Crate | What it ports |
 |---|---|
 | `fennec-pyjson` | byte-exact `json.dumps` formatting, so Rust and Python agree on the wire |
-| `fennec-economy` | context compaction (`compact`) |
 | `fennec-acp` | ACP frame encoding, clipping, piece splitting |
 | `fennec-outlets` | secret redaction and blocked-host checks |
 | `fennec-preflight` | the memory preflight plan |
 | `fennec-client` | the loopback protocol clients (agent server + engine SSE) and suite/manifest discovery |
+
+Context compaction is not here: it has one Rust implementation, in
+[fennec-economy](https://github.com/Liso7150/fennec-economy), which `fennec-core`, the
+desktop app and the CLI all path-depend on. An earlier copy of the crate under `src/` was
+deleted once nothing consumed it.
 
 `fennec-rs`, the CLI binary over the same crates, lives in
 [fennec-cli](https://github.com/Liso7150/fennec-cli).
@@ -192,7 +196,7 @@ fennec setup --yes --install-deps                  # pip install missing core de
 
 ```bash
 python -m unittest discover -s tests -v     # 251 tests across 10 files, 1 skipped
-cd src && cargo test --offline             # 53 tests across the 6 crates
+cd src && cargo test --offline             # 51 tests across the 5 crates
 ```
 
 Everything is hermetic: no engine, no network, no model. The tokenizer/economy bridge is

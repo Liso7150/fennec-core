@@ -337,6 +337,13 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
             if isinstance(reasoning, str) and reasoning:
                 assistant["reasoning_content"] = reasoning
             tool_calls = msg.get("tool_calls") or []
+            if not tool_calls and assistant["content"]:
+                # The engine has no function calling, so a turn that follows the
+                # tool prompt arrives as a JSON object written into the content.
+                call = _text_tool_call(assistant["content"], tools)
+                if call is not None:
+                    tool_calls = [{"id": "text-" + uuid.uuid4().hex[:8], "type": "function",
+                                   "function": {"name": call[0], "arguments": json.dumps(call[1])}}]
             if tool_calls:
                 assistant["tool_calls"] = tool_calls
             messages.append(assistant)
@@ -415,6 +422,58 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
             current = SESSIONS.get(sid)
             if current is not None:
                 current["history"] = messages
+
+
+def _text_tool_call(text, tools):
+    """Parse a tool call the model wrote as JSON text instead of a native one.
+
+    Only a JSON object naming an advertised tool whose remaining keys fit that
+    tool's parameter list counts; quoted examples and prose JSON stay prose.
+    """
+    if not isinstance(text, str) or "{" not in text:
+        return None
+    schema = {t["function"]["name"]:
+              (set(t["function"]["parameters"].get("properties", ())),
+               set(t["function"]["parameters"].get("required", ())))
+              for t in tools}
+    for start in (i for i, ch in enumerate(text) if ch == "{"):
+        depth, in_str, esc = 0, False, False
+        for end in range(start, len(text)):
+            ch = text[end]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth:
+                    continue
+                try:
+                    parsed = json.loads(text[start:end + 1])
+                except json.JSONDecodeError:
+                    break
+                if not isinstance(parsed, dict):
+                    break
+                name = parsed.get("tool") or parsed.get("name")
+                if not isinstance(name, str) or name not in schema:
+                    break
+                args = parsed.get("args")
+                if not isinstance(args, dict):
+                    args = {k: v for k, v in parsed.items() if k not in ("tool", "name")}
+                if "path" not in args and isinstance(args.get("source"), str):
+                    args["path"] = args.pop("source")
+                props, required = schema[name]
+                if not set(args) <= props or not required <= set(args):
+                    break
+                return name, args
+    return None
 
 
 def _args(tc):
