@@ -94,7 +94,7 @@ pub fn get_json(base: &str, route: &str, headers: &[(&str, &str)]) -> Result<Val
     let mut s = connect(base, GET_TIMEOUT)?;
     write_request(&mut s, &host, "GET", route, headers, None)?;
     let (status, body) = read_response(&mut s)?;
-    if status != 200 {
+    if !(200..300).contains(&status) {
         return Err(format!("http {status}"));
     }
     serde_json::from_str(&body).map_err(|e| format!("json: {e}"))
@@ -105,7 +105,7 @@ pub fn post_json(base: &str, route: &str, headers: &[(&str, &str)], body: &Value
     let mut s = connect(base, POST_TIMEOUT)?;
     write_request(&mut s, &host, "POST", route, headers, Some(&body.to_string()))?;
     let (status, text) = read_response(&mut s)?;
-    if status != 200 {
+    if !(200..300).contains(&status) {
         return Err(format!("http {status}: {text}"));
     }
     serde_json::from_str(&text).map_err(|e| format!("json: {e}"))
