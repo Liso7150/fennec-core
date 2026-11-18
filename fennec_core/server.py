@@ -145,7 +145,10 @@ def workspace_within(root: Path, requested) -> Path:
     if requested is not None and not isinstance(requested, str):
         raise HTTPException(422, "workspace must be a path string")
     try:
-        candidate = Path(_norm(Path(requested).expanduser())) if requested else base
+        # A workspace is named relative to the configured root, so "." is the root
+        # itself and not whichever directory the service was started in. An
+        # absolute name still wins; the jail check below decides if it is allowed.
+        candidate = base if not requested else Path(_norm(base / Path(requested).expanduser()))
     except (OSError, ValueError):
         raise HTTPException(400, "workspace is not a usable path") from None
     if not candidate.is_dir():
@@ -640,13 +643,16 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
                                           "x-accel-buffering": "no"})
 
     @app.get("/api/files")
-    def files(path: str = "."):
-        return _listing(ToolContext(workspace=str(config.workspace)), path)
+    def files(path: str = ".", workspace: str | None = None):
+        # `workspace` is the directory a run was started in: a delivered path is
+        # relative to it, so reading one back has to jail to the same place.
+        return _listing(ToolContext(workspace=str(workspace_within(config.workspace, workspace))), path)
 
     @app.get("/api/file")
-    def file_read(path: str):
+    def file_read(path: str, workspace: str | None = None):
+        root = str(workspace_within(config.workspace, workspace))
         try:
-            result = read_file(ToolContext(workspace=str(config.workspace)), path, numbered=False)
+            result = read_file(ToolContext(workspace=root), path, numbered=False)
         except (PermissionError, ValueError, OSError) as exc:
             raise HTTPException(403, str(exc)) from exc
         if not result.get("ok"):
