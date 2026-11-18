@@ -987,6 +987,47 @@ class TextToolCallTests(ApprovalTests):
         state = self.settle(sid)
         self.assertEqual((self.root / "note.md").read_text(encoding="utf-8"), "hi")
 
+    def test_a_call_expression_executes(self):
+        for content in ('toolwrite_file(path="note.md", content="hi")',
+                        "write_file(path='note.md', content='hi')"):
+            with self.subTest(content=content[:20]):
+                sid = self.start([{"role": "assistant", "content": content},
+                                  {"role": "assistant", "content": "done"}],
+                                 allow_write=True)
+                state = self.settle(sid)
+                self.assertEqual(state["status"], "done")
+                self.assertEqual((self.root / "note.md").read_text(encoding="utf-8"), "hi")
+
+    def test_a_call_quoted_inside_a_sentence_stays_prose(self):
+        sid = self.start([{"role": "assistant",
+                           "content": 'I could call write_file(path="note.md", '
+                                      'content="hi") here, or not.'},
+                          {"role": "assistant", "content": "done"}],
+                         allow_write=True)
+        state = self.settle(sid)
+        self.assertEqual(state["status"], "done")
+        self.assertFalse((self.root / "note.md").exists())
+        self.assertEqual([s["type"] for s in state["steps"]].count("tool"), 0)
+
+    def test_a_command_spelling_asks_for_approval_too(self):
+        sid = self.start([{"role": "assistant",
+                           "content": json.dumps({"command": "write_file",
+                                                  "path": "note.md", "content": "hi"})},
+                          {"role": "assistant", "content": "done"}],
+                         require_approval=True)
+        ask = self.ask(sid)
+        self.assertEqual(ask["name"], "write_file")
+        self.assertEqual(ask["args"], {"path": "note.md", "content": "hi"})
+
+    def test_a_bare_shell_command_is_not_read_as_a_tool_name(self):
+        sid = self.start([{"role": "assistant",
+                           "content": json.dumps({"command": "ls -la"})},
+                          {"role": "assistant", "content": "done"}],
+                         require_approval=True)
+        state = self.settle(sid)
+        self.assertEqual(state["status"], "done")
+        self.assertEqual([s["type"] for s in state["steps"]].count("tool"), 0)
+
     def test_prose_json_and_foreign_keys_stay_prose(self):
         cases = [{"tool": "deploy", "target": "prod"},
                  {"tool": "write_file", "path": "note.md", "content": "hi", "force": True},

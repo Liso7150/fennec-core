@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import json
+import re
 import threading
 import time
 import uuid
@@ -425,12 +427,13 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
 
 
 def _text_tool_call(text, tools):
-    """Parse a tool call the model wrote as JSON text instead of a native one.
+    """Parse a tool call the model wrote as text instead of a native one.
 
     Only a JSON object naming an advertised tool whose remaining keys fit that
     tool's parameter list counts; quoted examples and prose JSON stay prose.
+    Models spell the name key `tool`, `name` or `command`, so all three count.
     """
-    if not isinstance(text, str) or "{" not in text:
+    if not isinstance(text, str):
         return None
     schema = {t["function"]["name"]:
               (set(t["function"]["parameters"].get("properties", ())),
@@ -461,18 +464,81 @@ def _text_tool_call(text, tools):
                     break
                 if not isinstance(parsed, dict):
                     break
-                name = parsed.get("tool") or parsed.get("name")
+                name = parsed.get("tool") or parsed.get("name") or parsed.get("command")
                 if not isinstance(name, str) or name not in schema:
                     break
                 args = parsed.get("args")
                 if not isinstance(args, dict):
-                    args = {k: v for k, v in parsed.items() if k not in ("tool", "name")}
+                    args = {k: v for k, v in parsed.items()
+                            if k not in ("tool", "name", "command")}
                 if "path" not in args and isinstance(args.get("source"), str):
                     args["path"] = args.pop("source")
                 props, required = schema[name]
                 if not set(args) <= props or not required <= set(args):
                     break
                 return name, args
+    return _call_syntax_tool_call(text, schema)
+
+
+# Some checkpoints answer a tool prompt with a call expression, not JSON.
+_CALL_NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+def _call_syntax_tool_call(text, schema):
+    """Parse `write_file(path="a.md", content="hi")` as a tool call.
+
+    The template's `tool` marker often arrives glued to the name, so
+    `toolwrite_file(...)` is the same call. Only the final expression of the
+    message counts: a call quoted inside a sentence has trailing prose and
+    stays prose, which is what keeps an example from executing.
+    """
+    for m in _CALL_NAME.finditer(text):
+        name = m.group(1)
+        if name not in schema and name.startswith("tool") and name[4:] in schema:
+            name = name[4:]
+        if name not in schema:
+            continue
+        open_at = text.index("(", m.end() - 1)
+        depth, quote, esc, close = 0, "", False, -1
+        for i in range(open_at, len(text)):
+            ch = text[i]
+            if quote:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == quote:
+                    quote = ""
+            elif ch in "\"'":
+                quote = ch
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if not depth:
+                    close = i
+                    break
+        if close < 0 or text[close + 1:].strip():
+            continue
+        try:
+            node = ast.parse("_f(" + text[open_at + 1:close] + ")", mode="eval").body
+        except SyntaxError:
+            continue
+        if not isinstance(node, ast.Call) or node.args:
+            continue
+        args = {}
+        for kw in node.keywords:
+            if kw.arg is None:
+                args = {}
+                break
+            try:
+                args[kw.arg] = ast.literal_eval(kw.value)
+            except (ValueError, SyntaxError):
+                args = {}
+                break
+        props, required = schema[name]
+        if set(args) <= props and required <= set(args):
+            return name, args
     return None
 
 
