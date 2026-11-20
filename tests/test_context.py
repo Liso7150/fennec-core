@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fennec_core import context, loop
+import context, loop
 
 
 class ElideTests(unittest.TestCase):

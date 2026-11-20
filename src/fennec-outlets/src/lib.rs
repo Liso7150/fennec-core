@@ -1,8 +1,8 @@
-//! Rust port of the pure half of `fennec_core/outlets.py`: transcript redaction
+//! Rust port of the pure half of `outlets.py`: transcript redaction
 //! and the address gate that decides which URL a delegated browser agent may be
-//! pointed at. The HTTP and process plumbing that drives Jev and OpenBot stays
-//! in Python - those are I/O, not math, and the suite never starts either peer
-//! from a test.
+//! pointed at. The HTTP and process plumbing that runs the outlets - Fennec's
+//! own loop and OpenBot - stays in Python: those are I/O, not math,
+//! and the suite never starts either peer from a test.
 //!
 //! `src/goldens/` holds CPython's own output for 2 000 transcript lines, every
 //! reserved-address sample and 2 000 URLs; the tests fail on any drift.
@@ -13,12 +13,12 @@ pub mod url;
 use ip::Ip;
 use url::urlsplit;
 
-/// `SECRET_ENV_KEYS + ("TYPESAFE_API_KEY",)` in the order Python walks it.
+/// `SECRET_ENV_KEYS` in the order Python walks it.
 pub const REDACT_ENV_KEYS: [&str; 4] = [
     "FENNEC_API_KEY",
     "COLI_API_KEY",
     "FENNEC_APP_TOKEN",
-    "TYPESAFE_API_KEY",
+    "LIQUID_API_KEY",
 ];
 
 const BEARER_MIN: usize = 8;

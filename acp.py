@@ -7,12 +7,12 @@ close), modes, streamed message and thought chunks, tool-call reporting, plans,
 usage, per-call permission requests and cancellation that answers with
 ``stopReason: "cancelled"`` rather than an error.
 
-The turn itself is not re-implemented here. ``fennec_core.loop`` runs it and
+The turn itself is not re-implemented here. ``loop.py`` runs it and
 this file translates the events it already produces into ``session/update``
 notifications, so an editor, the desktop app and the PWA all drive one agent.
-Jev and OpenBot arrive as ordinary tools through ``fennec_core.outlets``; an
-MCP server the client hands us arrives as ordinary tools through
-``fennec_core.mcp``.
+The browser outlet (Fennec's own loop) and OpenBot arrive as ordinary
+tools through ``outlets.py``; an MCP server the client hands us arrives
+as ordinary tools through ``mcp.py``.
 
 Transcripts live in ``~/.fennec/sessions/acp-<id>.json`` (override with
 ``FENNEC_ACP_HOME``) so ``session/load`` can replay them in another process.
@@ -29,11 +29,11 @@ import threading
 import time
 import uuid
 
-from . import engine, loop
-from . import mcp as mcp_bridge
-from . import outlets as outlets_bridge
-from .context import limits
-from .tools import approval_context
+import engine, loop
+import mcp as mcp_bridge
+import outlets as outlets_bridge
+from context import limits
+from tools import approval_context
 
 PROTOCOL_VERSION = 1
 
@@ -281,7 +281,7 @@ class Agent:
     def settings(self):
         if self._config is None:
             try:
-                from .config import load_config
+                from config import load_config
                 self._config = load_config(environ=self.env)
             except Exception:
                 self._config = False
@@ -720,6 +720,8 @@ class Agent:
                 self._tool_open(session, event)
             elif kind == "tool_end":
                 self._tool_close(session, event)
+            elif kind == "progress":
+                self._tool_note(session, event)
             elif kind == "plan":
                 self._update(session, {"sessionUpdate": "plan", "entries": event.get("entries") or []})
             elif kind == "usage":
@@ -765,6 +767,23 @@ class Agent:
                               "content": {"type": "text", "text": _clip(str(text), 2000)}}]
         self._update(session, update)
         session.current = None
+
+    def _tool_note(self, session: Session, event: dict) -> None:
+        """One live line from a tool that is still inside a call.
+
+        ACP has no verb for it, so it rides as an update on the call it reports on: same id,
+        still ``in_progress``, one text row. It is not recorded, the way a permission flip is
+        not, because replaying half a browser run's notes reads as history that never happened.
+        """
+        text = str(event.get("text") or "")
+        if not text:
+            return
+        self._update(session, {"sessionUpdate": "tool_call_update",
+                               "toolCallId": _call_id(session, event),
+                               "status": "in_progress",
+                               "content": [{"type": "content",
+                                            "content": {"type": "text", "text": _clip(text, 300)}}]},
+                     record=False)
 
     def _mcp_tools(self, session: Session) -> dict:
         """Client-supplied MCP servers become ordinary tools, refreshed each turn."""
@@ -988,7 +1007,7 @@ def _failure(state: dict) -> str:
 
 
 def _version() -> str:
-    from . import __version__
+    from version import __version__
     return __version__
 
 

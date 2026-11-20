@@ -5,6 +5,11 @@
  "deduped": 2,
  "budget_chars": 48000,
  "result_chars": 6000,
+ "files_summarized": 0,
+ "helper_chats_summarized": 0,
+ "screenshots_summarized": 0,
+ "token_savings": 0,
+ "webpages_extracted": 0,
  "sizes": [
   15,
   27,

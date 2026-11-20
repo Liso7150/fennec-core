@@ -17,9 +17,9 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from fennec_core import engine as engine_mod
-from fennec_core.config import load_config
-from fennec_core.engine import Engine, EngineError
+import engine as engine_mod
+from config import load_config
+from engine import Engine, EngineError
 
 
 def sse(payload):

@@ -15,7 +15,8 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
-from .config import Config, is_loopback, load_config
+from config import Config, is_loopback, load_config
+import convert
 
 
 class EngineError(RuntimeError):
@@ -28,6 +29,13 @@ class EngineCancelled(EngineError):
 
 ABORT_POLL_S = 0.25
 _STREAM_DONE = object()
+# A turn that falls into a short cycle keeps paying for it: two runs on the live
+# engine spent 300 s emitting the same two tool fences over and over, and no
+# sampling knob below notices, because temperature, top-k and the nucleus all
+# describe one step rather than the sequence. The engine leaves its logits alone
+# until asked, so the agent asks; an engine that predates the knob ignores the
+# key.
+REPEAT_PENALTY = 1.1
 
 
 def abortable_lines(response, abort, poll_s=ABORT_POLL_S):
@@ -161,7 +169,7 @@ class Engine:
         except (KeyError, IndexError, TypeError) as exc:
             raise EngineError("Engine did not advertise a model") from exc
 
-    def _engine_env(self):
+    def _engine_env(self, *, model=None):
         env = dict(os.environ)
         # Scrubbed first: a flag left in the caller's shell would decide the
         # child's backend for it, and a secret must not reach a child that has
@@ -170,7 +178,7 @@ class Engine:
                     "FENNEC_VULKAN", "FENNEC_METAL", "FENNEC_CUDA"):
             env.pop(key, None)
         env.update(HF_HOME=str(self.config.cache_root / "huggingface"))
-        pin(env, "MODEL", self.config.model)
+        pin(env, "MODEL", model or self.config.model)
         pin(env, "API_KEY", self.config.api_key)
         # An unset backend is the engine's own vendor policy (NVIDIA=cuda,
         # Apple=metal, else vulkan); an env flag would outrank that policy and
@@ -197,10 +205,46 @@ class Engine:
                    else {"start_new_session": True})
         return [str(self._engine_binary()), *args], options
 
-    def _model_args(self):
-        if not self.config.model or not Path(self.config.model).is_dir():
+    def model_path(self, source=None, *, start: bool = False):
+        """The folder the engine can actually read, or the reason there is not one yet.
+
+        A packed checkpoint is not an error the engine raises: it answers in fluent
+        nonsense, so the download folder never goes on the command line as-is. Passing
+        `start` is the caller's consent to spend hours of CPU and tens of gigabytes,
+        which is why a read-only diagnostic never asks for it.
+        """
+        source = source or self.config.model
+        outcome = convert.resolve(source, cache_root=self.config.cache_root, start=start)
+        if outcome["state"] == "ready":
+            return outcome["path"]
+        detail = outcome.get("detail") or outcome["state"]
+        if outcome.get("percent") is not None:
+            detail = f"{detail} ({outcome['percent']}%)"
+        raise EngineError(f"Model {Path(source).name} is not servable yet: {detail}")
+
+    def _convert_state(self):
+        """Progress of a conversion this model needs, read from its state file only.
+
+        A full `resolve` would parse every shard header on every status poll; one small
+        JSON is what a GUI needs to say "converting" without costing a request.
+        """
+        if not self.config.model:
+            return None
+        state = convert.read_state(convert.output_for(self.config.model, self.config.cache_root))
+        if state and state.get("status") in {"running", "failed"}:
+            return {key: state.get(key) for key in ("status", "step", "percent", "error")}
+        return None
+
+    def _model_args(self, *, model=None):
+        """The engine's model flags.
+
+        `model` is a path that already went through `model_path`; resolving here when a
+        caller omits it is what keeps a packed folder from reaching the command line.
+        """
+        source = model or (self.model_path() if self.config.model else "")
+        if not source or not Path(source).is_dir():
             raise EngineError("Choose an installed model with FENNEC_MODEL or the model configuration key")
-        return ["--model", self.config.model, "--policy", self.config.policy, "--ctx", str(self.config.ctx)]
+        return ["--model", source, "--policy", self.config.policy, "--ctx", str(self.config.ctx)]
 
     def _owns_engine(self):
         return self._process is not None and self._process.poll() is None
@@ -214,13 +258,17 @@ class Engine:
             url = urlsplit(self.config.engine_url)
             if not is_loopback(url.hostname) or url.scheme != "http":
                 raise EngineError("Only a local HTTP engine can be spawned; remote/TLS engines are attach-only")
+            # Resolved once, then used for both the flag and the environment: an env pin
+            # left on the packed folder would outrank nothing here but would disagree
+            # with the command line for any child that reads it.
+            model = self.model_path(start=True)
             command, options = self._command([
-                "serve", "--auto-tier", *self._model_args(), "--host", url.hostname,
+                "serve", "--auto-tier", *self._model_args(model=model), "--host", url.hostname,
                 "--port", str(url.port or 80), "--ngen", "4096"])
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open("w", encoding="utf-8") as log:
                 self._process = subprocess.Popen(command, cwd=self.config.engine_root,
-                    env=self._engine_env(), stdin=subprocess.DEVNULL, stdout=log, stderr=log, **options)
+                    env=self._engine_env(model=model), stdin=subprocess.DEVNULL, stdout=log, stderr=log, **options)
             process = self._process
         began = time.monotonic()
         while time.monotonic() - began < wait_s:
@@ -297,7 +345,14 @@ class Engine:
         return self._diagnostic(["doctor"] + (self._model_args() if self.config.model else []))
 
     def status(self):
-        return {"running": self.is_running(), "owned": self._owns_engine(), "engine_url": self.config.engine_url}
+        out = {"running": self.is_running(), "owned": self._owns_engine(),
+               "engine_url": self.config.engine_url}
+        # A conversion outlives the request that asked for it, and the only way back to
+        # the caller is this file; without it the engine would just look slow to start.
+        convert_state = self._convert_state()
+        if convert_state:
+            out["convert"] = convert_state
+        return out
 
     def logs(self, n=60):
         try:
@@ -329,7 +384,7 @@ class Engine:
     def chat(self, messages, tools=None, tool_choice="auto", max_tokens=2048,
              temperature=0.2, timeout=600, reasoning_effort=None, enable_thinking=None):
         body = {"model": self.model_id(), "messages": messages, "max_tokens": max_tokens,
-                "temperature": temperature, "stream": False}
+                "temperature": temperature, "repeat_penalty": REPEAT_PENALTY, "stream": False}
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
         if enable_thinking is not None:
@@ -354,7 +409,7 @@ class Engine:
         turn keeps the partial message.
         """
         body = {"model": self.model_id(), "messages": messages, "max_tokens": max_tokens,
-                "temperature": temperature, "stream": True}
+                "temperature": temperature, "repeat_penalty": REPEAT_PENALTY, "stream": True}
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
         if enable_thinking is not None:

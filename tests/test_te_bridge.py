@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fennec_core import tokeneconomizer as te
+import te_bridge as te
 
 
 class StubHook:

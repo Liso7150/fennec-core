@@ -24,17 +24,25 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .config import BACKENDS, POLICIES
+from config import BACKENDS, POLICIES
+import convert
 
+# The keys a config file may carry. `web_python` says which interpreter runs the browser
+# loop; the core owns the default, this list only has to accept what the core (or the hub)
+# writes. A key an older setup left behind is not here, so the next write drops it.
 CONFIG_KEYS = {
     "engine_root", "suite_root", "models_root", "cache_root", "python", "model",
     "engine_url", "web_root", "workspace", "backend", "ctx", "policy",
-    "jev_root", "openbot_url",
+    "web_python", "openbot_url",
 }
+# An empty string is a real answer for these, and only for these: "no model yet",
+# "use whichever interpreter can browse". This is `config.py`'s rule; a key accepted
+# empty here but not there would load-fail.
+EMPTY_OK = {"model", "web_python"}
 SECRET_KEYS = {"api_key", "app_token", "token", "fennec_api_key", "fennec_app_token", "coli_api_key"}
 INPUT_KEYS = {
     "root", "engine_root", "suite_root", "models_root", "cache_root", "python",
-    "model", "engine_url", "backend", "ctx", "policy", "jev_root", "openbot_url",
+    "model", "engine_url", "backend", "ctx", "policy", "openbot_url", "web_python",
 }
 # The same three places the desktop's runtimePaths probes for the native engine.
 FENNEC_DIRS = (("target", "release"), ("target", "debug"), ())
@@ -259,7 +267,7 @@ def validate_engine(directory) -> dict:
             "kind": "fennec"}
 
 
-def scan_models(directory, *, limit: int = 40) -> list[dict]:
+def scan_models(directory, *, limit: int = 40, cache_root=None) -> list[dict]:
     root = Path(str(directory or "")).expanduser()
     try:
         entries = sorted(root.iterdir())
@@ -283,15 +291,22 @@ def scan_models(directory, *, limit: int = 40) -> list[dict]:
                 size += weight.stat().st_size
             except OSError:
                 pass
-        models.append({
-            "name": entry.name,
-            "path": str(entry),
-            "size_gb": round(size / 1e9, 2),
-            "shards": len(weights),
-            "has_config": has_config,
-            "has_weights": bool(weights),
-            "ready": has_config and bool(weights),
-        })
+        info = {"name": entry.name, "path": str(entry),
+                "size_gb": round(size / 1e9, 2), "shards": len(weights),
+                "has_config": has_config, "has_weights": bool(weights)}
+        # Readiness has to mean "the engine can read this", not "a config.json and a
+        # .safetensors are in the same folder". Edge0-35B-A3B passes the old test and
+        # answers in fluent nonsense, because its weights are packed int4 with scale
+        # sidecars nothing but a decoder reads.
+        try:
+            state = convert.resolve(entry, cache_root=cache_root, start=False)
+        except OSError:
+            state = {"state": "unusable", "kind": "unknown", "detail": "unreadable folder"}
+        info.update({"kind": state["kind"], "state": state["state"],
+                     "detail": state.get("detail") or "", "ready": state["state"] == "ready"})
+        if state.get("path") != info["path"]:
+            info["resolved"] = state["path"]
+        models.append(info)
     models.sort(key=lambda model: (not model["ready"], model["name"].lower()))
     return models[:limit]
 
@@ -355,7 +370,7 @@ def validate_config(data) -> dict:
         if key == "ctx":
             if type(value) is not int or not 0 <= value <= 1_048_576:
                 raise ValueError("ctx must be an integer from 0 (automatic) to 1048576")
-        elif not isinstance(value, str) or (not value.strip() and key != "model"):
+        elif not isinstance(value, str) or (not value.strip() and key not in EMPTY_OK):
             raise ValueError(f"{key} must be a nonempty string")
     if data.get("backend", "auto") not in BACKENDS:
         raise ValueError(f"backend must be one of {', '.join(BACKENDS)}")
@@ -406,8 +421,8 @@ def build_config(values, *, home=None, system=None) -> dict:
     }
     if input_values.get("python"):
         config["python"] = _abs(input_values["python"], home_path)
-    if str(input_values.get("jev_root") or "").strip():
-        config["jev_root"] = _abs(input_values["jev_root"], home_path)
+    if str(input_values.get("web_python") or "").strip():
+        config["web_python"] = _abs(input_values["web_python"], home_path)
     if str(input_values.get("openbot_url") or "").strip():
         config["openbot_url"] = str(input_values["openbot_url"]).strip()
     config["ctx"] = int(config["ctx"])
@@ -484,13 +499,17 @@ def resolve_values(args, existing: dict, *, home: Path, device: dict) -> dict:
     }
     model = args.model or existing.get("model") or ""
     if not model:
-        ready = [entry for entry in scan_models(models_root) if entry["ready"]]
+        ready = [entry for entry in scan_models(models_root, cache_root=values["cache_root"])
+                 if entry["ready"]]
         if len(ready) == 1:
             model = ready[0]["path"]
     values["model"] = model
     # The hub may have written the optional outlet keys; carry them through so a
-    # re-run of setup never silently drops them.
-    values["jev_root"] = existing.get("jev_root", "")
+    # re-run of setup never silently drops them. A user's pin is not something
+    # setup gets to forget. The retired `jev_root` and `web_engine` are the
+    # exception: they name an agent this suite no longer ships, so letting them
+    # through would fail the validator below, and dropping them is the migration.
+    values["web_python"] = existing.get("web_python", "")
     values["openbot_url"] = existing.get("openbot_url", "")
     return values
 
@@ -511,8 +530,10 @@ def prompt_values(values: dict, models: list[dict], device: dict, input_fn, out=
     if models:
         out("Models found:")
         for index, model in enumerate(models, start=1):
-            state = "ready" if model["ready"] else "incomplete"
-            out(f"  {index}. {model['name']} ({model['size_gb']} GB, {state})")
+            # "incomplete" used to cover both a half-finished download and a packed
+            # checkpoint the engine cannot read; the two have opposite remedies.
+            tag = "ready" if model["ready"] else f"{model['state']}: {model['detail']}"
+            out(f"  {index}. {model['name']} ({model['size_gb']} GB, {tag})")
     current = values.get("model") or ""
     default_index = next((str(index) for index, model in enumerate(models, start=1)
                           if model["path"] == current), "none")
@@ -598,7 +619,7 @@ def main(argv=None, *, config=None, home=None, environ=None, input_fn=None,
 
     if python.get("ok"):
         values["python"] = python["command"]
-    models = scan_models(values["models_root"])
+    models = scan_models(values["models_root"], cache_root=values["cache_root"])
     if not args.yes and not args.dry_run:
         values = prompt_values(values, models, device, input_fn or input, out=out)
         if values.get("python") and values["python"] != python.get("command"):

@@ -19,7 +19,7 @@ import hashlib
 import json
 import os
 
-from . import rust_bridge
+import rust_bridge
 
 DEFAULT_BUDGET_CHARS = 48_000
 DEFAULT_RESULT_CHARS = 6_000

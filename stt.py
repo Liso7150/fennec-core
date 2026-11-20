@@ -1,11 +1,11 @@
 """Local speech-to-text sidecar: faster-whisper on the CPU, loopback only.
 
-Started on demand by fennec_core.engine (phone PWA and desktop both use it
+Started on demand by engine.py (phone PWA and desktop both use it
 through POST /api/stt). The model is downloaded once into the shared HF cache
 (HF_HOME under cache_root) by faster-whisper itself; audio never leaves the
 machine.
 
-    python -m fennec_core.stt --port 8183 [--model base.en]
+    python -m stt --port 8183 [--model base.en]
 
 Endpoints: GET /health, POST /transcribe (raw audio body: webm/ogg/wav/mp4).
 """

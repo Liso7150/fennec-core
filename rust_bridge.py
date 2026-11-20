@@ -35,7 +35,7 @@ import threading
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent.parent
+ROOT = HERE.parent
 
 # The cold-pass break-even measured above: below this the pipe costs more than the
 # Python loop even when there is nothing to dedup.

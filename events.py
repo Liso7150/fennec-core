@@ -78,6 +78,24 @@ class ToolStartEvent:
 
 
 @dataclass(frozen=True)
+class ProgressEvent:
+    """A running tool saying what it is inside.
+
+    It rides between ``tool_start`` and ``tool`` with the same ``call_id``, and a shell
+    shows one live line per call rather than a row per event: a browser decision takes
+    tens of seconds, and without this the chat looks like it stopped.
+    """
+    type: Literal["progress"] = "progress"
+    name: str = ""
+    call_id: str = ""
+    text: str = ""
+    step: int = 0
+    of: int = 0
+    i: int = 0
+    t: float = 0.0
+
+
+@dataclass(frozen=True)
 class ToolEvent:
     """A tool call completed with a result."""
     type: Literal["tool"] = "tool"
@@ -145,6 +163,19 @@ class ApprovalRequiredEvent:
 
 
 @dataclass(frozen=True)
+class QueueEvent:
+    """Follow-up prompts the loop queued for a complex run.
+
+    It arrives before the ``final`` step: the shells drain their queue on the
+    step that ends the run, so the first follow-up has to be waiting by then.
+    """
+    type: Literal["queue"] = "queue"
+    items: list[str] = field(default_factory=list)
+    i: int = 0
+    t: float = 0.0
+
+
+@dataclass(frozen=True)
 class UsageEvent:
     """Token usage and context stats for the turn."""
     type: Literal["usage"] = "usage"
@@ -156,9 +187,22 @@ class UsageEvent:
 
 Event = (
     PlanEvent | PartialEvent | TextEvent | ReasoningEvent | AssistantEvent |
-    ToolStartEvent | ToolEvent | ToolEndEvent | FinalEvent | ErrorEvent |
-    CancelledEvent | ApprovalRequiredEvent | UsageEvent
+    ToolStartEvent | ProgressEvent | ToolEvent | ToolEndEvent | QueueEvent | FinalEvent |
+    ErrorEvent | CancelledEvent | ApprovalRequiredEvent | UsageEvent
 )
+
+
+# Every kind the loop can emit, by its ``type`` tag. loop.STEP_TYPES is the
+# other copy of this list, and the desktop and PWA mirrors of both are asserted
+# against it (tests/test_events.py, fennec-desktop/src/events.rs), so a new step
+# kind has to be registered here as well.
+EVENT_BY_KIND: dict[str, type] = {
+    cls().type: cls for cls in (
+        PlanEvent, PartialEvent, TextEvent, ReasoningEvent, AssistantEvent,
+        ToolStartEvent, ProgressEvent, ToolEvent, ToolEndEvent, QueueEvent, FinalEvent,
+        ErrorEvent, CancelledEvent, ApprovalRequiredEvent, UsageEvent,
+    )
+}
 
 
 def to_dict(event: Event) -> dict[str, Any]:
@@ -176,23 +220,7 @@ def from_dict(data: dict[str, Any]) -> Event:
     The ``type`` field selects the dataclass; unknown types fall back to a
     plain dict so a future event kind does not break an old client.
     """
-    kind = data.get("type")
-    mapping = {
-        "plan": PlanEvent,
-        "partial": PartialEvent,
-        "text": TextEvent,
-        "reasoning": ReasoningEvent,
-        "assistant": AssistantEvent,
-        "tool_start": ToolStartEvent,
-        "tool": ToolEvent,
-        "tool_end": ToolEndEvent,
-        "final": FinalEvent,
-        "error": ErrorEvent,
-        "cancelled": CancelledEvent,
-        "approval_required": ApprovalRequiredEvent,
-        "usage": UsageEvent,
-    }
-    cls = mapping.get(kind)
+    cls = EVENT_BY_KIND.get(data.get("type"))
     if cls is None:
         return data  # type: ignore[return-value]
     return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})

@@ -13,7 +13,7 @@ import subprocess
 import threading
 import time
 
-from . import __version__
+from version import __version__
 
 PROTOCOL_VERSION = "2024-11-05"
 CALL_TIMEOUT_S = 120

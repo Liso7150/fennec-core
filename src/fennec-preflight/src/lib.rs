@@ -1,4 +1,4 @@
-//! Device-aware model preflight, ported from `fennec_core/preflight.py`: the
+//! Device-aware model preflight, ported from `preflight.py`: the
 //! weights on disk plus the KV cache a session really needs, against this
 //! machine. Read-only and offline - no model is loaded and no request is made.
 //!

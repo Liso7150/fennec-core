@@ -22,13 +22,13 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from . import loop
-from .config import Config, is_loopback, load_config
-from .engine import Engine, EngineError, get_engine
-from .outlets import Outlets
-from .tools import ToolContext, list_dir, read_file
+import loop
+from config import Config, is_loopback, load_config
+from engine import Engine, EngineError, get_engine
+from outlets import Outlets
+from tools import ToolContext, list_dir, read_file
 
 CLIENT_HEADER = "X-Fennec-Client"
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -104,6 +104,14 @@ class AgentRequest(BaseModel):
     allow_web: bool = False
     require_approval: bool = False
     max_steps: int = Field(default=14, ge=1, le=40)
+    reasoning_effort: str | None = Field(default="auto", max_length=16)
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _known_effort(cls, value):
+        if value is not None and value not in loop.EFFORT_LEVELS:
+            raise ValueError(f"reasoning_effort must be one of {', '.join(loop.EFFORT_LEVELS)}")
+        return value
 
 
 class CancelRequest(BaseModel):
@@ -506,6 +514,7 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
                                allow_shell=req.allow_shell or req.require_approval,
                                allow_web=req.allow_web or req.require_approval,
                                require_approval=req.require_approval,
+                               reasoning_effort=req.reasoning_effort or "auto",
                                engine_client=client, outlets=agent_outlets)
         loop.start_thread(sid, req.max_steps)
         return {"id": sid, "workspace": str(workspace)}
@@ -555,21 +564,27 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
     def outlet_run(req: OutletRequest):
         """Run one task on the local browser outlet installed on this machine.
 
-        Fennec Desktop drives Jev / OpenBot through here rather than keeping a
-        second implementation in JavaScript: the outlet contract lives in
+        Fennec Desktop drives the browser agents through here rather than keeping
+        a second implementation in JavaScript: the outlet contract lives in
         outlets.py once. Approval belongs to the caller's UI; this route only
         reaches loopback outlets the user already installed, and is behind the
         same client-header, Host and app-token guard as /api/agent/start.
         """
-        tool = {"jev": "web_task", "openbot": "coworker_task"}.get(req.outlet)
-        if tool is None:
-            raise HTTPException(422, "outlet must be 'jev' or 'openbot'")
-        if not agent_outlets.available(tool):
-            raise HTTPException(409, f"{req.outlet} is not available on this machine; "
-                                     "run `fennec outlets` to see what is missing")
-        if tool == "web_task":
+        # The id says which tool to answer with, and each has one lane now, so the
+        # gate is asked about exactly what the route then calls. A shell whose user
+        # clicked a row that discovery does not advertise gets a refusal, not a
+        # surprise second agent.
+        if req.outlet == "fennec":
+            if not agent_outlets.available("web_task"):
+                raise HTTPException(409, f"{req.outlet} is not available on this machine; "
+                                         "run `fennec outlets` to see what is missing")
             return agent_outlets.web_task(req.goal, req.url, max_steps=req.max_steps)
-        return agent_outlets.coworker_task(req.goal, req.agent)
+        if req.outlet == "openbot":
+            if not agent_outlets.available("coworker_task"):
+                raise HTTPException(409, "openbot is not available on this machine; "
+                                         "run `fennec outlets` to see what is missing")
+            return agent_outlets.coworker_task(req.goal, req.agent)
+        raise HTTPException(422, "outlet must be 'fennec' or 'openbot'")
 
     @app.post("/api/ag-ui")
     async def ag_ui_run(req: RunAgentInput):
@@ -657,7 +672,8 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
             raise HTTPException(403, str(exc)) from exc
         if not result.get("ok"):
             raise HTTPException(404, result.get("error") or "not a file")
-        return {"path": result["path"], "lines": result["lines"], "content": result["content"]}
+        return {"path": result["path"], "lines": result["lines"],
+                "bytes": result["bytes"], "content": result["content"]}
 
     web_root = Path(config.web_root)
     if web_root.is_dir() and (web_root / "index.html").is_file():
@@ -722,7 +738,7 @@ def main(argv=None):
     p_agent.add_argument("--allow-write", action="store_true")
     p_agent.add_argument("--allow-shell", action="store_true")
     p_agent.add_argument("--allow-web", action="store_true",
-                         help="let the task use the optional Jev/OpenBot web outlets")
+                         help="let the task use the optional web outlets (Fennec's browser loop, OpenBot)")
     p_agent.add_argument("--max-steps", type=int, default=14)
     p_agent.add_argument("--url", default=os.environ.get("FENNEC_SERVICE_URL",
                                                          "http://127.0.0.1:8787"))
@@ -736,7 +752,7 @@ def main(argv=None):
         serve(args.host, args.port, web_root=args.web_root)
         return 0
     if args.command == "acp":
-        from . import acp as acp_agent
+        import acp as acp_agent
         return acp_agent.main(["--check"] if args.check else [])
     if args.command == "outlets":
         print(json.dumps(Outlets(load_config()).status(), indent=2, ensure_ascii=False))

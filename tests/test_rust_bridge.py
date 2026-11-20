@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fennec_core import context, outlets, rust_bridge
+import context, outlets, rust_bridge
 
 EXE = rust_bridge.binary_path()
 BUDGET = context.DEFAULT_BUDGET_CHARS

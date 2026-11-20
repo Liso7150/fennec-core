@@ -2023,21 +2023,21 @@
 {"in": "bearer ........", "env": {"FENNEC_API_KEY": "sekret-1"}, "out": "bearer [redacted]"}
 {"in": "bearer ________", "env": {"FENNEC_API_KEY": "sekret-1"}, "out": "bearer [redacted]"}
 {"in": "key sekret-1 leaked", "env": {"FENNEC_API_KEY": "sekret-1"}, "out": "key [redacted] leaked"}
-{"in": "ts-2 and dup and a", "env": {"FENNEC_API_KEY": "sekret-1"}, "out": "ts-2 and dup and a"}
-{"in": "Bearer abcdefgh", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "Bearer [redacted]"}
-{"in": "bearer  abcdefgh", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "bearer  [redacted]"}
-{"in": "BEARER abcdefghijklmnop", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "BEARER [redacted]"}
-{"in": "bearer abcdefg", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "bearer abcdefg"}
-{"in": "bearer abcdefghijk-lm_n.oP", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "bearer [redacted]"}
-{"in": "bearer!abcdefgh", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "bearer!abcdefgh"}
-{"in": "bearer\t\tAbCdEfGhIj", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "bearer\t\t[redacted]"}
-{"in": "no secrets here", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "no secrets here"}
-{"in": "FENNEC_API_KEY=literal", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "FENNEC_API_KEY=literal"}
-{"in": "x hf_ABCDEFGHIJKLMNOPQRSTUVW y", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "x hf_ABCDEFGHIJKLMNOPQRSTUVW y"}
-{"in": "bearer ........", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "bearer [redacted]"}
-{"in": "bearer ________", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "bearer [redacted]"}
-{"in": "key sekret-1 leaked", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "key sekret-1 leaked"}
-{"in": "ts-2 and dup and a", "env": {"COLI_API_KEY": "", "TYPESAFE_API_KEY": "ts-2"}, "out": "[redacted] and dup and a"}
+{"in": "ts-2 and dup and a and liq-3", "env": {"FENNEC_API_KEY": "sekret-1"}, "out": "ts-2 and dup and a and liq-3"}
+{"in": "Bearer abcdefgh", "env": {"COLI_API_KEY": ""}, "out": "Bearer [redacted]"}
+{"in": "bearer  abcdefgh", "env": {"COLI_API_KEY": ""}, "out": "bearer  [redacted]"}
+{"in": "BEARER abcdefghijklmnop", "env": {"COLI_API_KEY": ""}, "out": "BEARER [redacted]"}
+{"in": "bearer abcdefg", "env": {"COLI_API_KEY": ""}, "out": "bearer abcdefg"}
+{"in": "bearer abcdefghijk-lm_n.oP", "env": {"COLI_API_KEY": ""}, "out": "bearer [redacted]"}
+{"in": "bearer!abcdefgh", "env": {"COLI_API_KEY": ""}, "out": "bearer!abcdefgh"}
+{"in": "bearer\t\tAbCdEfGhIj", "env": {"COLI_API_KEY": ""}, "out": "bearer\t\t[redacted]"}
+{"in": "no secrets here", "env": {"COLI_API_KEY": ""}, "out": "no secrets here"}
+{"in": "FENNEC_API_KEY=literal", "env": {"COLI_API_KEY": ""}, "out": "FENNEC_API_KEY=literal"}
+{"in": "x hf_ABCDEFGHIJKLMNOPQRSTUVW y", "env": {"COLI_API_KEY": ""}, "out": "x hf_ABCDEFGHIJKLMNOPQRSTUVW y"}
+{"in": "bearer ........", "env": {"COLI_API_KEY": ""}, "out": "bearer [redacted]"}
+{"in": "bearer ________", "env": {"COLI_API_KEY": ""}, "out": "bearer [redacted]"}
+{"in": "key sekret-1 leaked", "env": {"COLI_API_KEY": ""}, "out": "key sekret-1 leaked"}
+{"in": "ts-2 and dup and a and liq-3", "env": {"COLI_API_KEY": ""}, "out": "ts-2 and dup and a and liq-3"}
 {"in": "Bearer abcdefgh", "env": {"FENNEC_APP_TOKEN": "a"}, "out": "Be[redacted]rer [redacted]bcdefgh"}
 {"in": "bearer  abcdefgh", "env": {"FENNEC_APP_TOKEN": "a"}, "out": "be[redacted]rer  [redacted]bcdefgh"}
 {"in": "BEARER abcdefghijklmnop", "env": {"FENNEC_APP_TOKEN": "a"}, "out": "BEARER [redacted]bcdefghijklmnop"}
@@ -2051,7 +2051,21 @@
 {"in": "bearer ........", "env": {"FENNEC_APP_TOKEN": "a"}, "out": "be[redacted]rer ........"}
 {"in": "bearer ________", "env": {"FENNEC_APP_TOKEN": "a"}, "out": "be[redacted]rer ________"}
 {"in": "key sekret-1 leaked", "env": {"FENNEC_APP_TOKEN": "a"}, "out": "key sekret-1 le[redacted]ked"}
-{"in": "ts-2 and dup and a", "env": {"FENNEC_APP_TOKEN": "a"}, "out": "ts-2 [redacted]nd dup [redacted]nd [redacted]"}
+{"in": "ts-2 and dup and a and liq-3", "env": {"FENNEC_APP_TOKEN": "a"}, "out": "ts-2 [redacted]nd dup [redacted]nd [redacted] [redacted]nd liq-3"}
+{"in": "Bearer abcdefgh", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "Bearer [redacted]"}
+{"in": "bearer  abcdefgh", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "bearer  [redacted]"}
+{"in": "BEARER abcdefghijklmnop", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "BEARER [redacted]"}
+{"in": "bearer abcdefg", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "bearer abcdefg"}
+{"in": "bearer abcdefghijk-lm_n.oP", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "bearer [redacted]"}
+{"in": "bearer!abcdefgh", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "bearer!abcdefgh"}
+{"in": "bearer\t\tAbCdEfGhIj", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "bearer\t\t[redacted]"}
+{"in": "no secrets here", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "no secrets here"}
+{"in": "FENNEC_API_KEY=literal", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "FENNEC_API_KEY=literal"}
+{"in": "x hf_ABCDEFGHIJKLMNOPQRSTUVW y", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "x hf_ABCDEFGHIJKLMNOPQRSTUVW y"}
+{"in": "bearer ........", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "bearer [redacted]"}
+{"in": "bearer ________", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "bearer [redacted]"}
+{"in": "key sekret-1 leaked", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "key sekret-1 leaked"}
+{"in": "ts-2 and dup and a and liq-3", "env": {"LIQUID_API_KEY": "liq-3"}, "out": "ts-2 and dup and a and [redacted]"}
 {"in": "Bearer abcdefgh", "env": {"FENNEC_API_KEY": "dup"}, "out": "Bearer [redacted]"}
 {"in": "bearer  abcdefgh", "env": {"FENNEC_API_KEY": "dup"}, "out": "bearer  [redacted]"}
 {"in": "BEARER abcdefghijklmnop", "env": {"FENNEC_API_KEY": "dup"}, "out": "BEARER [redacted]"}
@@ -2065,7 +2079,7 @@
 {"in": "bearer ........", "env": {"FENNEC_API_KEY": "dup"}, "out": "bearer [redacted]"}
 {"in": "bearer ________", "env": {"FENNEC_API_KEY": "dup"}, "out": "bearer [redacted]"}
 {"in": "key sekret-1 leaked", "env": {"FENNEC_API_KEY": "dup"}, "out": "key sekret-1 leaked"}
-{"in": "ts-2 and dup and a", "env": {"FENNEC_API_KEY": "dup"}, "out": "ts-2 and [redacted] and a"}
+{"in": "ts-2 and dup and a and liq-3", "env": {"FENNEC_API_KEY": "dup"}, "out": "ts-2 and [redacted] and a and liq-3"}
 {"in": "Bearer abcdefgh", "env": {}, "out": "Bearer [redacted]"}
 {"in": "bearer  abcdefgh", "env": {}, "out": "bearer  [redacted]"}
 {"in": "BEARER abcdefghijklmnop", "env": {}, "out": "BEARER [redacted]"}
@@ -2079,4 +2093,4 @@
 {"in": "bearer ........", "env": {}, "out": "bearer [redacted]"}
 {"in": "bearer ________", "env": {}, "out": "bearer [redacted]"}
 {"in": "key sekret-1 leaked", "env": {}, "out": "key sekret-1 leaked"}
-{"in": "ts-2 and dup and a", "env": {}, "out": "ts-2 and dup and a"}
+{"in": "ts-2 and dup and a and liq-3", "env": {}, "out": "ts-2 and dup and a and liq-3"}

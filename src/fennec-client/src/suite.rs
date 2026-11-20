@@ -352,7 +352,7 @@ impl Suite {
     }
 
     /// Launch the agent service the owning repo defines: the `fennec-agent`
-    /// console script when installed, otherwise `python -m fennec_core.server`.
+    /// console script when installed, otherwise `python -m server`.
     /// `serve` is a required subcommand (`server.py:main`), host/port default to
     /// 127.0.0.1:8787. Best effort: false means "still unavailable", not a lie.
     pub fn serve(&self, port: u16) -> bool {
@@ -386,8 +386,8 @@ impl Suite {
             out.push(vec!["fennec-agent".into(), "serve".into(), "--host".into(), "127.0.0.1".into(), "--port".into(), port.to_string()]);
         }
         if let Some(p) = py {
-            if self.core_dir().map(|d| d.join("fennec_core").join("server.py").is_file()).unwrap_or(false) {
-                out.push(vec![p.to_string(), "-m".into(), "fennec_core.server".into(), "serve".into(),
+            if self.core_dir().map(|d| d.join("server.py").is_file()).unwrap_or(false) {
+                out.push(vec![p.to_string(), "-m".into(), "server".into(), "serve".into(),
                               "--host".into(), "127.0.0.1".into(), "--port".into(), port.to_string()]);
             }
         }

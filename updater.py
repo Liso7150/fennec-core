@@ -1,8 +1,8 @@
 """Auto-update system: silent background updates from GitHub releases,
-plus `fennec update --experimental` for devs to pull from master branch.
+plus `fennec update --experimental` for devs to pull from the main branch.
 
 Normal mode checks tagged releases and updates silently in the background.
-Experimental mode pulls the latest commit from master for developers.
+Experimental mode pulls the latest commit from main for developers.
 Every download is verified against a SHA-256 checksum before applying.
 """
 
@@ -11,7 +11,6 @@ import os
 import platform
 import shutil
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,8 +113,8 @@ def check_stable(current_version: str) -> Optional[Release]:
 
 
 def check_experimental() -> Optional[Release]:
-    """Check master branch for latest commit"""
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/master"
+    """Check the default branch for the latest commit"""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
     
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "fennec-updater"})
@@ -177,7 +176,7 @@ def replace_binary(new_data: bytes) -> None:
 def update(experimental: bool = False) -> str:
     """Main update function"""
     if experimental:
-        print("[update] Checking experimental channel (master branch)...")
+        print("[update] Checking experimental channel (main branch)...")
         release = check_experimental()
         if release is None:
             return "Already on latest experimental build"
@@ -189,7 +188,7 @@ def update(experimental: bool = False) -> str:
         return f"Experimental update available: {release.version} (build from source or wait for CI)"
     else:
         print("[update] Checking stable releases...")
-        from . import __version__
+        from version import __version__
         current = __version__
         
         release = check_stable(current)

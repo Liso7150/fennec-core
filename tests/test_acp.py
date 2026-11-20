@@ -21,7 +21,7 @@ import time
 import unittest
 from unittest import mock
 
-from fennec_core import acp, loop, mcp
+import acp, loop, mcp
 
 MCP_SERVER = """
 import json, sys
@@ -146,7 +146,7 @@ class FailingEngine(ScriptEngine):
     """A stream that dies mid-turn, the way a crashed engine does."""
 
     def chat_stream(self, messages, tools=None, abort=None, **kwargs):
-        from fennec_core.engine import EngineError
+        from engine import EngineError
         self.calls.append({"messages": list(messages), "tools": list(tools or [])})
         raise EngineError("Engine stream failed; check engine health and configuration")
 
@@ -195,9 +195,14 @@ class NoOutlets:
     def available(self, name):
         return name in self.enabled
 
+    def status(self, refresh=False):
+        return {"fennec": {"present": "web_task" in self.enabled},
+                "openbot": {"present": "coworker_task" in self.enabled}}
+
     def web_task(self, goal, url="", **kwargs):
         self.calls.append(("web_task", goal, url))
-        return {"ok": True, "outlet": "jev-ultrafast", "status": "done", "text": "the page says hi"}
+        return {"ok": True, "outlet": "fennec-webagent", "status": "done",
+                "text": "the page says hi"}
 
     def coworker_task(self, goal, agent="", **kwargs):
         self.calls.append(("coworker_task", goal, agent))
@@ -370,7 +375,7 @@ class AcpCase(unittest.TestCase):
         (self.root / "src" / "app.py").write_text("print('hi')\n", encoding="utf-8")
         self.store = self.root / "acp-store"
         self.store.mkdir()
-        patcher = mock.patch("fennec_core.tokeneconomizer.Bridge", QuietBridge)
+        patcher = mock.patch("te_bridge.Bridge", QuietBridge)
         patcher.start()
         self.addCleanup(patcher.stop)
         loop.SESSIONS.clear()
@@ -389,7 +394,7 @@ class HandshakeTests(AcpCase):
                                                          "clientCapabilities": {"fs": {}}}))
         self.assertEqual(result["protocolVersion"], acp.PROTOCOL_VERSION)
         self.assertEqual(result["agentInfo"]["name"], "fennec")
-        from fennec_core import __version__
+        from version import __version__
         self.assertEqual(result["agentInfo"]["version"], __version__)
         capabilities = result["agentCapabilities"]
         self.assertTrue(capabilities["loadSession"])
@@ -557,6 +562,44 @@ class TurnTests(AcpCase):
         message_ids = {update["messageId"] for update in updates
                        if update["sessionUpdate"] == "agent_message_chunk"}
         self.assertEqual(len(message_ids), 1)
+
+    def test_a_live_note_updates_the_call_it_reports_on(self):
+        """ACP has no progress verb, so a note from inside a call rides as an update on it.
+
+        It stays ``in_progress`` and is not recorded: a client that reconnects should see the
+        call's real outcome, not half a browser run's notes replayed as though they were
+        history. An empty note says nothing, so it opens no row either.
+        """
+        engine = ScriptEngine({"text": "looking", "tool_calls": [("list_dir", {"path": "."})]},
+                              {"text": "two files"})
+        client = self.client(engine)
+        session_id = client.start_session(str(self.root))
+
+        def working(name, args, ctx, **kwargs):
+            ctx.progress({"text": "Deciding step 1 of 3", "step": 1, "of": 3})
+            ctx.progress({"text": ""})
+            return {"ok": True, "result": "app.py, notes.md"}
+
+        with mock.patch.object(loop, "execute", working):
+            client.prompt("browse the site")
+        updates = client.updates(session_id, timeout=0)
+        opened = next(update for update in updates if update["sessionUpdate"] == "tool_call")
+        notes = [update for update in updates
+                 if update["sessionUpdate"] == "tool_call_update"
+                 and update["status"] == "in_progress"]
+        self.assertEqual([note["toolCallId"] for note in notes], [opened["toolCallId"]],
+                         "a note updates the row the client already drew instead of adding one")
+        self.assertEqual(notes[0]["content"],
+                         [{"type": "content",
+                           "content": {"type": "text", "text": "Deciding step 1 of 3"}}])
+        closed = next(update for update in updates
+                      if update["sessionUpdate"] == "tool_call_update"
+                      and update["status"] == "completed")
+        self.assertLess(updates.index(notes[0]), updates.index(closed),
+                        "the note arrives while the call is still running")
+        record = json.loads((self.store / f"acp-{session_id}.json").read_text(encoding="utf-8"))
+        self.assertIn("app.py, notes.md", json.dumps(record["updates"]))
+        self.assertNotIn("Deciding step 1 of 3", json.dumps(record["updates"]))
 
     def test_chunk_ids_open_a_new_message_after_a_tool(self):
         engine = ScriptEngine({"text": "opening ", "tool_calls": [("list_dir", {"path": "."})]},
@@ -1109,14 +1152,20 @@ class EngineOwnershipTests(AcpCase):
 
 class DiagnosticTests(AcpCase):
     def test_check_describes_the_agent_without_a_client(self):
-        report = acp.check()
+        # The real bridge would open a socket to 127.0.0.1:3001 and start an interpreter
+        # per candidate; a diagnostic that answers its own outlet question is not owed
+        # a browser.
+        with mock.patch.object(acp.Agent, "_outlets", return_value=NoOutlets("web_task")):
+            report = acp.check()
         self.assertEqual(report["protocolVersion"], 1)
         self.assertEqual(report["transport"], "stdio")
         self.assertEqual(report["modes"], ["agent", "ask"])
         self.assertIn("session/prompt", report["methods"])
         self.assertIn("session/cancel", report["methods"])
         self.assertTrue(Path(report["store"]).is_absolute())
-        self.assertIn("jev", report["outlets"])
+        self.assertEqual(sorted(report["outlets"]), ["fennec", "openbot"])
+        self.assertTrue(report["outlets"]["fennec"]["present"])
+        self.assertFalse(report["outlets"]["openbot"]["present"])
 
 
 class StdioEncodingTests(AcpCase):

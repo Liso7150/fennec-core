@@ -1,4 +1,4 @@
-//! The ACP pipe's pure parts, ported from `fennec_core/acp.py`: newline-delimited
+//! The ACP pipe's pure parts, ported from `acp.py`: newline-delimited
 //! JSON framing and the two bounds a streamed update passes through (`_clip`,
 //! `_pieces`). Fennec's transport is one JSON object per line, so the codec is
 //! the hot path of every token the agent emits.

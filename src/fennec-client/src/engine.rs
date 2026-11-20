@@ -1,5 +1,5 @@
 //! Client for the Fennec inference engine (loopback 127.0.0.1:8184), the Rust
-//! counterpart of `fennec_core/engine.py`. Chat is streamed as SSE:
+//! counterpart of `engine.py`. Chat is streamed as SSE:
 //! `data: {json}\n\n`, terminated by `data: [DONE]`, and the socket closing
 //! early is how the engine detects a cancelled client (`src/serve.rs`).
 use crate::http;

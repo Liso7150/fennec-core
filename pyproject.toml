@@ -19,9 +19,19 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["httpx>=0.27"]
 stt = ["faster-whisper==1.2.1", "av>=14,<18"]  # PyAV 18+ removed metadata_errors that faster-whisper passes
+# Only materialising converted tensors needs numpy; classifying a folder and planning the
+# conversion stay stdlib, so a machine that never converts pays nothing for it.
+convert = ["numpy>=1.24"]
 
 [project.scripts]
-fennec-agent = "fennec_core.server:main"
+fennec-agent = "server:main"
+fennec-convert = "convert:main"
 
+# Every module sits at the repo root, so the wheel is a list of top-level modules
+# rather than one package. tests/test_packaging.py fails if this drifts from `ls *.py`.
 [tool.setuptools]
-packages = ["fennec_core"]
+py-modules = [
+  "acp", "config", "context", "convert", "engine", "events", "liquid",
+  "loop", "mcp", "outlets", "preflight", "rust_bridge", "server", "setup_wizard",
+  "snapshot", "stt", "te_bridge", "tools", "updater", "version", "web_driver", "webagent",
+]

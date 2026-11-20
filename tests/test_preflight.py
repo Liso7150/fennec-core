@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fennec_core import preflight
+import preflight
 
 
 class KvGeometryTests(unittest.TestCase):

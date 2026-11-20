@@ -10,7 +10,7 @@ from pathlib import Path
 from itertools import islice
 from typing import NamedTuple
 
-from .outlets import SECRET_ENV_KEYS
+from outlets import SECRET_ENV_KEYS
 
 MAX_READ = 24000
 MAX_RESULT = 7000
@@ -29,6 +29,9 @@ class ToolContext:
     engine_client: object = None
     cache_root: str = ""
     outlets: object = None
+    # Set by the loop around each call so a tool that runs for half a minute can say what it
+    # is doing while it does it: a callable taking {"text", "step", "of"}, or None.
+    progress: object = None
     extra: object = None
 
 
@@ -129,10 +132,14 @@ def read_file(ctx, path, numbered=True):
     with open(p, encoding="utf-8", errors="replace") as f:
         text = f.read(MAX_READ + 1)
     lines = text.splitlines()
+    # Size on disk, not of the decoded text: Windows writes "\n" as "\r\n", so a
+    # CRLF file reads back with fewer bytes than it has.
+    size = os.path.getsize(p)
     if not numbered:
-        return {"ok": True, "path": path, "lines": len(lines), "content": _truncate(text, MAX_READ)}
+        return {"ok": True, "path": path, "lines": len(lines), "bytes": size,
+                "content": _truncate(text, MAX_READ)}
     numbered_text = "\n".join(f"{i+1}\t{ln}" for i, ln in enumerate(lines[:600]))
-    return {"ok": True, "path": path, "lines": len(lines), "content": numbered_text}
+    return {"ok": True, "path": path, "lines": len(lines), "bytes": size, "content": numbered_text}
 
 
 def write_file(ctx, path, content):
@@ -147,7 +154,7 @@ def write_file(ctx, path, content):
     p = _safe(ctx, path)
     with open(p, "w", encoding="utf-8") as f:
         f.write(content)
-    return {"ok": True, "path": path, "bytes": len(content.encode("utf-8"))}
+    return {"ok": True, "path": path, "bytes": os.path.getsize(p)}
 
 
 def edit_file(ctx, path, old, new):
@@ -251,7 +258,7 @@ def semantic_search(ctx, query, k=8):
 
     if not ctx.allow_npu:
         raise PermissionError("semantic search requires explicitly enabled NPU support")
-    from .engine import get_engine
+    from engine import get_engine
     engine = ctx.engine_client or get_engine()
     root = _safe(ctx, ".")
     cache_root = Path(ctx.cache_root or engine.config.cache_root) / "fennec-embed"
@@ -313,15 +320,16 @@ def semantic_search(ctx, query, k=8):
                         for s, c in hits[:max(1, min(k, 20))]]}
 
 
-# --- optional web-agent outlets (Jev / OpenBot) ---------------------------
+# --- optional web-agent outlets (Fennec's own loop / OpenBot) -------------
 OUTLET_TOOLS = ("web_task", "coworker_task")
 
 
 def web_task(ctx, goal, url="", max_steps=12):
-    """One URL-scoped end state handed to the local Jev browser agent."""
+    """One URL-scoped end state handed to a browser agent on this machine."""
     if ctx.outlets is None:
         return {"ok": False, "error": "no web outlets configured for this session"}
-    return ctx.outlets.web_task(goal, url, max_steps=int(max_steps or 12))
+    return ctx.outlets.web_task(goal, url, max_steps=int(max_steps or 12),
+                                progress=ctx.progress)
 
 
 def coworker_task(ctx, goal, agent=""):
@@ -355,10 +363,10 @@ TOOLS = {
     "git_status": (git_status, "git status --short of the workspace.", {}, []),
     "git_diff": (git_diff, "git diff of the workspace.", {}, []),
     "web_task": (web_task,
-                 "Delegate one URL-scoped browsing goal to the local Jev browser agent "
-                 "(browser-use/jev-ultrafast). Describe the END state, not the clicks. Only "
-                 "available when that outlet is installed on this machine; it uses its own "
-                 "TypeSafe policy key and never reads workspace credentials.",
+                 "Delegate one URL-scoped browsing goal to the local browser agent "
+                 "(Fennec's own loop, decided by Liquid d1.2). Describe the END state, not "
+                 "the clicks. Only available when that agent is installed on this machine; "
+                 "it uses its own decision key and never reads workspace credentials.",
                  {"goal": {"type": "string", "description": "end state to reach"},
                   "url": {"type": "string", "description": "start page, https:// or http://"},
                   "max_steps": {"type": "integer", "description": "snapshot budget, default 12"}},
@@ -408,7 +416,7 @@ GATES = {
     "git_status": Gate("allow_shell", "low", "asks git to read the repository"),
     "git_diff": Gate("allow_shell", "low", "asks git to read the repository"),
     "web_task": Gate("allow_web", "high",
-                     "hands the goal to the Jev browser outlet, which then visits the web"),
+                     "hands the goal to the browser outlet on this machine, which then visits the web"),
     "coworker_task": Gate("allow_web", "high",
                           "hands the goal to an OpenBot coworker, with its own files and browser"),
 }

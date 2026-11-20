@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fennec_core import setup_wizard as wizard
+import setup_wizard as wizard
 
 
 def make_engine(root: Path) -> Path:
@@ -66,6 +66,24 @@ class BuildConfigTests(unittest.TestCase):
                 wizard.build_config({"policy": "fastest"}, home=directory)
             with self.assertRaises(ValueError):
                 wizard.build_config({"ctx": "not-a-number"}, home=directory)
+
+    def test_a_browser_interpreter_pin_survives_the_wizard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = wizard.build_config({"root": directory,
+                                          "web_python": "browsenv/python"}, home=directory)
+            # Absolutised, because it is an executable the core launches. An empty pin
+            # means "whichever interpreter can browse", so the key stays out of the file.
+            self.assertEqual(config["web_python"], str(Path(directory) / "browsenv" / "python"))
+            self.assertNotIn("web_python", wizard.build_config({"root": directory}, home=directory))
+            self.assertNotIn("web_python",
+                             wizard.build_config({"root": directory, "web_python": "   "}, home=directory))
+            # There is no second browser agent to choose, so the selector that used to
+            # name one is refused by both doors: setup will not accept it as an option,
+            # and the writer will not put it in a file the core has to tolerate.
+            with self.assertRaisesRegex(ValueError, "Unsupported setup option: web_engine"):
+                wizard.build_config({"root": directory, "web_engine": "jev"}, home=directory)
+            with self.assertRaisesRegex(ValueError, "Unsupported configuration key: web_engine"):
+                wizard.validate_config({"web_engine": "jev"})
 
 
 class ProbeTests(unittest.TestCase):

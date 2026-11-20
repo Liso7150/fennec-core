@@ -1,11 +1,11 @@
 """Tests for the typed event envelope and domain models."""
 import unittest
 
-from fennec_core.events import (
+from events import (
     PlanEvent, PlanEntry, PartialEvent, TextEvent, ReasoningEvent,
     AssistantEvent, ToolStartEvent, ToolEvent, ToolEndEvent,
     FinalEvent, ErrorEvent, CancelledEvent, ApprovalRequiredEvent,
-    UsageEvent, to_dict, from_dict
+    UsageEvent, QueueEvent, EVENT_BY_KIND, to_dict, from_dict
 )
 
 
@@ -154,6 +154,22 @@ class TypedEventTests(unittest.TestCase):
         entry = PlanEntry(content="Test", status="pending")
         self.assertEqual(entry.priority, "medium")
         self.assertEqual(entry.status, "pending")
+
+    def test_queue_event_carries_the_subtasks(self):
+        event = QueueEvent(items=["add the missing test", "run the suite"], i=7, t=3.0)
+        data = to_dict(event)
+        self.assertEqual(data["type"], "queue")
+        self.assertEqual(from_dict(data), event)
+
+    def test_every_step_the_loop_emits_has_a_type(self):
+        """The envelope and the loop are one vocabulary, written twice.
+
+        A kind the loop can emit that is not registered here would reach a shell
+        as a bare dict and be silently skipped by anything matching on the type.
+        """
+        import loop
+        missing = [kind for kind in loop.STEP_TYPES if kind not in EVENT_BY_KIND]
+        self.assertEqual(missing, [])
 
 
 if __name__ == "__main__":

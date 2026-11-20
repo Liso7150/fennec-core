@@ -1,4 +1,4 @@
-![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2024, 251 Python tests, 6 Rust crates, 53 Rust tests, MIT license.](docs/hero.png)
+![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2024, 517 Python tests, 5 Rust crates, 54 Rust tests, MIT license.](docs/hero.png)
 
 ---
 
@@ -6,9 +6,9 @@
 
 | Python tests | Rust tests | Rust crates | Python modules | Runtime deps | `fennec-rs` binary |
 |:---:|:---:|:---:|:---:|:---:|:---:|
-| 251 in 10 files | 53 in 6 crates | 6 | 16 | 4 | ≈ 1.9 MB |
+| 517 in 14 files | 54 in 5 crates | 5 | 16 | 4 | ≈ 1.9 MB |
 
-Counts measured on 2026-11-15 from `tests/` (251 collected, 1 skipped) and `src/`. Binary size measured from
+Counts measured on 2026-11-20 from `tests/` (517 collected, 1 skipped) and `src/` (5 crates). Binary size measured from
 `fennec-cli/target/release/fennec-rs.exe` (Windows x64 `cargo build --release --offline`, 1,897,180 bytes at 1.0.0).
 
 One reference implementation for the desktop, coding-agent and JetBrains apps. Pure logic is
@@ -28,7 +28,7 @@ also ported to a six-crate Rust workspace that the Python side can delegate to.
         │
         ├── tools.py ──── read / edit / grep / run / git inside a workspace jail
         ├── context.py ── payload compaction (the UI transcript is never cut)
-        ├── outlets.py ── Jev / OpenBot, gated + redacted, off unless configured
+        ├── outlets.py ── Fennec's d1.2 loop / OpenBot, gated + redacted, off unless configured
         └── engine.py ── attach-first supervisor
                  │
                  ▼
@@ -77,7 +77,7 @@ at `/`. The engine listens on `127.0.0.1:8184`, started only when a message need
 | `fennec-agent chat <prompt>` | one-shot chat against the engine |
 | `fennec-agent agent <task>` | bounded tool loop (`--allow-write`, `--allow-shell`, `--allow-web`, `--max-steps`) |
 | `fennec-agent acp` | speak ACP v1 on stdio; `--check` reports what is advertised |
-| `fennec-agent outlets` | status of the optional Jev / OpenBot outlets |
+| `fennec-agent outlets` | status of the optional outlets: Fennec's own d1.2 loop, OpenBot |
 
 Reasoning pass-through (`reasoning_effort` / `enable_thinking`, `reasoning_content` deltas)
 and one validated `data:image/...;base64` vision part per request are supported. Tools are
@@ -92,7 +92,7 @@ read-only by default; the speech sidecar (faster-whisper, CPU) sits behind `POST
 | `loop.py` | bounded agent loop: tool-call accumulation, result feedback, step cap |
 | `tools.py` | read / edit / grep / run / git inside a workspace jail, plus optional NPU semantic search |
 | `context.py` | payload compaction: head+tail elision, dedup, total budget |
-| `outlets.py` | Jev / OpenBot clients, host allow-list, secret redaction |
+| `outlets.py` | outlet gates (`web_task` on Fennec's own loop, `coworker_task` on OpenBot), interpreter and transport discovery, host allow-list, secret redaction |
 | `mcp.py` | MCP server pool |
 | `preflight.py` | weights + peak KV cache against this machine's memory |
 | `server.py` | FastAPI app, routes, static PWA mount, loopback guards |
@@ -100,8 +100,10 @@ read-only by default; the speech sidecar (faster-whisper, CPU) sits behind `POST
 | `rust_bridge.py` | optional delegation to the Rust crates |
 | `config.py` | the shared config contract: `~/.fennec/config.json` with `FENNEC_*` overrides |
 | `setup_wizard.py` | headless first-run setup behind `fennec setup` |
-| `jev_driver.py` | browser-outlet driver |
-| `tokeneconomizer.py` | external tokenizer/economy bridge |
+| `webagent.py` | Fennec's own browser loop: the page-reader JS in `snapshot.py` offers indices, the d1 model picks one, this resolves and drives it over CDP |
+| `web_driver.py` | that loop's process boundary: launched with the interpreter that has the browser transport |
+| `liquid.py` | Liquid decision client: hosted `d1.2` (`LIQUID_API_KEY`) or a free open-weight `d1-2B` on loopback (`LIQUID_ENDPOINT`); stdlib HTTP(S) only |
+| `te_bridge.py` | external tokenizer/economy bridge |
 
 > [!NOTE]
 > NPU semantic search is **off by default**. It needs an embedding endpoint and is enabled
@@ -195,12 +197,13 @@ fennec setup --yes --install-deps                  # pip install missing core de
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v     # 251 tests across 10 files, 1 skipped
-cd src && cargo test --offline             # 51 tests across the 5 crates
+python -m unittest discover -s tests -v     # 517 tests across 14 files, 1 skipped
+cd src && cargo test --release --offline    # 54 tests across 14 suites
 ```
 
 Everything is hermetic: no engine, no network, no model. The tokenizer/economy bridge is
 forced off (`FENNEC_TOKENECONOMIZER=0`), outlet HTTP goes through a mocked `build_opener`,
+the d1.2 decision client takes an injected fake opener (so no call is ever paid for),
 and outlet subprocesses are mocked too. Rust goldens pin the exact byte formatting the
 Python side produces, so the two implementations cannot silently drift.
 
@@ -209,4 +212,14 @@ Python side produces, so the two implementations cannot silently drift.
 Engine: [Liso7150/fennec](https://github.com/Liso7150/fennec). Base idea:
 [JustVugg/colibri](https://github.com/JustVugg/colibri) — device-tiered MoE inference, still
 supported as the legacy fallback. Fine-tuning: [AirLLM](https://github.com/lyogavin/airllm).
+Browser policy: a Liquid **d1** decision model, used only through `liquid.py` - the
+hosted `d1.2`
+(`https://api.liquid.ai/decisions/v1/systemone`, paid, `LIQUID_API_KEY`) or the
+free open-weight `d1-2B` served on loopback (`LIQUID_ENDPOINT`, no key, $0.00). The page reader `snapshot.py`,
+which holds that JS as its `JS` constant, is derived from `snapshot.js` in [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast)
+(MIT License, Copyright (c) 2026 Browser Use) — attribution for derivative code, not a
+dependency: that checkout drives nothing here. The lane's CDP transport is
+[browser-harness](https://github.com/browser-use/browser-harness), installed from PyPI into
+Fennec's own browser venv (`~/.fennec/browser-tools/fennec/.venv`) instead of the interpreter
+the apps run on.
 Part of the [Fennec suite](https://github.com/Liso7150/fennec-environment-setup).

@@ -1,4 +1,9 @@
-"""Shared Fennec core: optional TokenEconomizer bridge (micro-skills, loop guard, folding).
+"""Optional TokenEconomizer bridge (micro-skills, loop guard, folding).
+
+It is not called ``tokeneconomizer.py`` because that name belongs to the external
+package this module loads: the checkout is put on ``sys.path`` and imported by that
+name, so a file of the same name here would win the race and the bridge would fail
+open without a word.
 
 Fennec's own context economy stays where it is: this module only adds what
 TokenEconomizer contributes — learned repository facts at session start, a
