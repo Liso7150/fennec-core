@@ -18,3 +18,6 @@ src/target/
 *.bin.old
 fennec-core-*.exe
 fennec-core-*.bin
+
+# Local-only planning and verification notes (kept out of the repo)
+.local-docs/

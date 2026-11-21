@@ -8,7 +8,7 @@
 |:---:|:---:|:---:|:---:|:---:|:---:|
 | 517 in 14 files | 54 in 5 crates | 5 | 16 | 4 | ≈ 1.9 MB |
 
-Counts measured on 2026-11-20 from `tests/` (517 collected, 1 skipped) and `src/` (5 crates). Binary size measured from
+Counts measured on 2026-11-21 from `tests/` (517 collected, 1 skipped) and `src/` (5 crates). Binary size measured from
 `fennec-cli/target/release/fennec-rs.exe` (Windows x64 `cargo build --release --offline`, 1,897,180 bytes at 1.0.0).
 
 One reference implementation for the desktop, coding-agent and JetBrains apps. Pure logic is
