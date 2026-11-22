@@ -1,4 +1,4 @@
-"""Optional web-agent outlets: Fennec's own browser loop and OpenBot.
+"""Optional agent outlets: Fennec's own browser loop, OpenBot and Antigravity.
 
 None is required by Fennec. ``web_task`` is answered by Fennec's own loop
 (:mod:`webagent`), which asks Liquid d1.2 for the next operation and the local engine
@@ -8,6 +8,8 @@ publishes. Everyone stays on this machine; keys stay wherever the owner put them
 """
 from __future__ import annotations
 
+import asyncio
+import importlib
 import importlib.util
 import json
 import os
@@ -46,8 +48,11 @@ BROWSE_PROBE_S = 10.0
 LANE_GRACE_S = 15.0
 # Fennec's own credentials. A tool transcript is model-visible and a child process
 # inherits the environment, so these stay out of both.
-SECRET_ENV_KEYS = ("FENNEC_API_KEY", "COLI_API_KEY", "FENNEC_APP_TOKEN", "LIQUID_API_KEY")
+SECRET_ENV_KEYS = ("FENNEC_API_KEY", "COLI_API_KEY", "FENNEC_APP_TOKEN", "FENNEC_MCP_TOKEN",
+                   "LIQUID_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+                   "GOOGLE_APPLICATION_CREDENTIALS")
 WEB_REPORT_BYTES = 200_000
+ANTIGRAVITY_TIMEOUT_S = 900
 WEB_ERROR_BYTES = 60_000
 # A live browser lane is polled, not waited on, so that the notes it appends can reach the
 # chat while a decision is still running. This is how long the parent sleeps between looks.
@@ -169,8 +174,18 @@ def redact(text: str, environ=None) -> str:
     return re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._-]{8,}", r"\1[redacted]", text)
 
 
+def _antigravity_sdk():
+    """Load the optional SDK and its policy hooks without making it a core dependency."""
+    try:
+        module = importlib.import_module("google.antigravity")
+        hooks = importlib.import_module("google.antigravity.hooks")
+    except (ImportError, ModuleNotFoundError):
+        return None
+    return module, hooks.policy
+
+
 class Outlets:
-    """Discovery plus two delegating calls. Every failure is a returned error."""
+    """Discovery plus optional delegating calls. Every failure is a returned error."""
 
     def __init__(self, config=None, environ=None):
         self.config = config
@@ -315,6 +330,111 @@ class Outlets:
                                for item in agents if isinstance(item, dict)][:20]})
         return out
 
+    # --- Antigravity -------------------------------------------------------
+    def antigravity_workspace(self) -> str:
+        configured = ((getattr(self.config, "workspace", "") if self.config else "")
+                      or self.env.get("FENNEC_WORKSPACE", ""))
+        if not configured:
+            return ""
+        try:
+            root = Path(configured).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            return ""
+        return str(root) if root.is_dir() else ""
+
+    def _antigravity_credentials(self) -> str:
+        if self.env.get("GEMINI_API_KEY") or self.env.get("GOOGLE_API_KEY"):
+            return "gemini"
+        vertex = self.env.get("GOOGLE_GENAI_USE_VERTEXAI", "").casefold() in {"1", "true", "yes"}
+        if vertex and self.env.get("GOOGLE_CLOUD_PROJECT") and self.env.get("GOOGLE_CLOUD_LOCATION"):
+            return "vertex"
+        return ""
+
+    def antigravity_status(self, refresh=False) -> dict:
+        if refresh:
+            self._cache.pop("antigravity", None)
+        return self._cached("antigravity", self._antigravity_probe, 300.0)
+
+    def _antigravity_probe(self) -> dict:
+        sdk = _antigravity_sdk()
+        workspace = self.antigravity_workspace()
+        credential = self._antigravity_credentials()
+        out = {"present": bool(sdk and credential and workspace),
+               "installed": sdk is not None,
+               "configured": bool(credential),
+               "workspace": bool(workspace),
+               "model": "Google Antigravity",
+               "tools": ["list_dir", "read_file", "grep"]}
+        if sdk is None:
+            out["error"] = "install the optional antigravity extra"
+        elif not credential:
+            out["error"] = "set GEMINI_API_KEY or configure Vertex AI"
+        elif not workspace:
+            out["error"] = "set FENNEC_WORKSPACE to an existing directory"
+        else:
+            out["note"] = "read-only Fennec workspace tools; Antigravity built-ins are disabled"
+        return out
+
+    def antigravity_task(self, goal: str, *, timeout: float = ANTIGRAVITY_TIMEOUT_S) -> dict:
+        """Run one Antigravity task with only Fennec's jailed read tools."""
+        if not isinstance(goal, str) or not goal.strip():
+            return {"ok": False, "outlet": "antigravity", "error": "antigravity_task needs a goal"}
+        state = self.antigravity_status()
+        if not state["present"]:
+            return {"ok": False, "outlet": "antigravity",
+                    "error": state.get("error") or "Antigravity is not available"}
+        sdk_info = _antigravity_sdk()
+        if sdk_info is None:
+            self._cache.pop("antigravity", None)
+            return {"ok": False, "outlet": "antigravity", "error": "Antigravity SDK is not installed"}
+        module, policy = sdk_info
+        workspace = self.antigravity_workspace()
+        from tools import ToolContext, grep, list_dir, read_file
+
+        ctx = ToolContext(workspace=workspace)
+
+        def list_dir_tool(path: str = ".") -> dict:
+            try:
+                return list_dir(ctx, path)
+            except (OSError, PermissionError, ValueError) as exc:
+                return {"ok": False, "error": str(exc)}
+
+        def read_file_tool(path: str, numbered: bool = True) -> dict:
+            try:
+                return read_file(ctx, path, numbered=numbered)
+            except (OSError, PermissionError, ValueError) as exc:
+                return {"ok": False, "error": str(exc)}
+
+        def grep_tool(pattern: str, path: str = ".") -> dict:
+            try:
+                return grep(ctx, pattern, path)
+            except (OSError, PermissionError, ValueError) as exc:
+                return {"ok": False, "error": str(exc)}
+
+        tools = [list_dir_tool, read_file_tool, grep_tool]
+        for name, tool in zip(("list_dir", "read_file", "grep"), tools):
+            tool.__name__ = name
+        try:
+            config = module.LocalAgentConfig(
+                tools=tools,
+                policies=[policy.deny_all(), *(policy.allow(tool.__name__) for tool in tools)],
+            )
+
+            async def run():
+                async with module.Agent(config) as agent:
+                    response = await agent.chat(goal.strip())
+                    return await response.text()
+
+            answer = asyncio.run(asyncio.wait_for(run(), timeout=max(5.0, float(timeout))))
+        except asyncio.TimeoutError:
+            return {"ok": False, "outlet": "antigravity",
+                    "error": f"Antigravity did not finish inside {int(timeout)}s"}
+        except Exception as exc:
+            return {"ok": False, "outlet": "antigravity",
+                    "error": redact(f"Antigravity run failed: {exc}", self.env)}
+        return {"ok": True, "outlet": "antigravity", "engine": "google-antigravity",
+                "answer": redact(str(answer), self.env)[:8000], "tools": [tool.__name__ for tool in tools]}
+
     def available(self, tool_name: str) -> bool:
         """Whether this machine can answer one tool.
 
@@ -330,11 +450,14 @@ class Outlets:
             return self.fennec_status()["present"]
         if tool_name == "coworker_task":
             return self.openbot_status()["present"]
+        if tool_name == "antigravity_task":
+            return self.antigravity_status()["present"]
         return False
 
     def status(self, refresh=False) -> dict:
         return {"fennec": self.fennec_status(refresh=refresh),
-                "openbot": self.openbot_status(refresh=refresh)}
+                "openbot": self.openbot_status(refresh=refresh),
+                "antigravity": self.antigravity_status(refresh=refresh)}
 
     # --- the web outlet ---------------------------------------------------
     def web_task(self, goal: str, url: str = "", *, max_steps: int = 12,

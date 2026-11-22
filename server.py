@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 import loop
 from config import Config, is_loopback, load_config
 from engine import Engine, EngineError, get_engine
+from mcp_server import handle as handle_mcp
 from outlets import Outlets
 from tools import ToolContext, list_dir, read_file
 
@@ -426,6 +427,10 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
             response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.post("/mcp")
+    async def mcp(request: Request):
+        return await handle_mcp(request, config, client)
+
     def engine_or_503():
         try:
             if not client.is_running():
@@ -583,7 +588,7 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
 
     @app.get("/api/outlets")
     def outlet_status(refresh: bool = False):
-        """What the optional web-agent outlets are, as this machine sees them."""
+        """What the optional agent outlets are, as this machine sees them."""
         return agent_outlets.status(refresh=refresh)
 
     @app.post("/api/outlets/run")
@@ -610,7 +615,12 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
                 raise HTTPException(409, "openbot is not available on this machine; "
                                          "run `fennec outlets` to see what is missing")
             return agent_outlets.coworker_task(req.goal, req.agent)
-        raise HTTPException(422, "outlet must be 'fennec' or 'openbot'")
+        if req.outlet == "antigravity":
+            if not agent_outlets.available("antigravity_task"):
+                raise HTTPException(409, "antigravity is not available on this machine; "
+                                         "run `fennec outlets` to see what is missing")
+            return agent_outlets.antigravity_task(req.goal)
+        raise HTTPException(422, "outlet must be 'fennec', 'openbot' or 'antigravity'")
 
     @app.post("/api/ag-ui")
     async def ag_ui_run(req: RunAgentInput):
@@ -768,7 +778,7 @@ def main(argv=None):
     p_agent.add_argument("--max-steps", type=int, default=14)
     p_agent.add_argument("--url", default=os.environ.get("FENNEC_SERVICE_URL",
                                                          "http://127.0.0.1:8787"))
-    sub.add_parser("outlets", help="show the optional web-agent outlets on this machine")
+    sub.add_parser("outlets", help="show the optional agent outlets on this machine")
     p_acp = sub.add_parser("acp", help="run the ACP v1 agent on stdio, for editors and IDEs")
     p_acp.add_argument("--check", action="store_true",
                        help="print the advertised protocol capabilities and exit")

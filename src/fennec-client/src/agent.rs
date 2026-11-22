@@ -21,7 +21,7 @@ pub const OUTLET_RUN_TIMEOUT: Duration = Duration::from_secs(960);
 /// status payload has never carried an `available` key.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outlet {
-    /// `"fennec"` / `"openbot"` — the value `/api/outlets/run` takes as `outlet`.
+    /// `"fennec"` / `"openbot"` / `"antigravity"` — the value `/api/outlets/run` takes as `outlet`.
     pub id: &'static str,
     pub label: &'static str,
     pub present: bool,
@@ -38,6 +38,7 @@ pub struct Outlet {
 pub struct Outlets {
     pub fennec: Option<Outlet>,
     pub openbot: Option<Outlet>,
+    pub antigravity: Option<Outlet>,
 }
 
 fn flag(v: &Value, key: &str) -> bool {
@@ -67,11 +68,12 @@ impl Outlets {
         Self {
             fennec: Outlet::fennec(v.get("fennec")),
             openbot: Outlet::openbot(v.get("openbot")),
+            antigravity: Outlet::antigravity(v.get("antigravity")),
         }
     }
 
     pub fn list(&self) -> Vec<&Outlet> {
-        self.fennec.iter().chain(self.openbot.iter()).collect()
+        self.fennec.iter().chain(self.openbot.iter()).chain(self.antigravity.iter()).collect()
     }
 
     /// True only when core sent that outlet and it is installed.
@@ -83,6 +85,7 @@ impl Outlets {
         match id {
             "fennec" => self.fennec.as_ref(),
             "openbot" => self.openbot.as_ref(),
+            "antigravity" => self.antigravity.as_ref(),
             _ => None,
         }
     }
@@ -128,6 +131,19 @@ impl Outlet {
             format!("not installed — {model} needs LIQUID_API_KEY or LIQUID_ENDPOINT")
         };
         Some(Self { id: "fennec", label: "Fennec", present, detail, agents: Vec::new() })
+    }
+
+    fn antigravity(v: Option<&Value>) -> Option<Self> {
+        let v = v?;
+        let present = flag(v, "present");
+        let detail = if present {
+            "installed — read-only workspace tools".into()
+        } else {
+            v.get("error").and_then(Value::as_str)
+                .unwrap_or("not configured — install SDK, credentials and workspace")
+                .to_string()
+        };
+        Some(Self { id: "antigravity", label: "Antigravity", present, detail, agents: Vec::new() })
     }
 
     fn openbot(v: Option<&Value>) -> Option<Self> {

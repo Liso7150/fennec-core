@@ -200,6 +200,73 @@ class SecurityTests(ClientCase):
         self.assertEqual(closed, [True])
 
 
+class McpTests(ClientCase):
+    def mcp(self, method, params=None, request_id=1, headers=None):
+        body = {"jsonrpc": "2.0", "id": request_id, "method": method}
+        if params is not None:
+            body["params"] = params
+        merged = {"Authorization": "Bearer nod-test"}
+        if headers:
+            merged.update(headers)
+        return self.client.post("/mcp", headers=merged, json=body)
+
+    def test_mcp_is_disabled_without_explicit_token(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.client.post("/mcp", json={}).status_code, 404)
+
+    def test_mcp_requires_its_own_bearer_token(self):
+        with mock.patch.dict(os.environ, {"FENNEC_MCP_TOKEN": "nod-test"}, clear=True):
+            self.assertEqual(self.client.post("/mcp", json={}).status_code, 401)
+            self.assertEqual(self.client.post("/mcp", headers={"Authorization": "Bearer wrong"},
+                                             json={}).status_code, 401)
+            self.assertEqual(self.mcp("ping").status_code, 200)
+
+    def test_mcp_initialize_and_tool_listing(self):
+        with mock.patch.dict(os.environ, {"FENNEC_MCP_TOKEN": "nod-test"}, clear=True):
+            initialized = self.mcp("initialize", {"protocolVersion": "2025-06-18",
+                                                   "capabilities": {},
+                                                   "clientInfo": {"name": "nod", "version": "test"}})
+            self.assertEqual(initialized.status_code, 200)
+            self.assertEqual(initialized.headers["mcp-protocol-version"], "2025-06-18")
+            self.assertEqual(initialized.json()["result"]["protocolVersion"], "2025-06-18")
+            self.assertIn("tools", initialized.json()["result"]["capabilities"])
+            listed = self.mcp("tools/list")
+            names = {item["name"] for item in listed.json()["result"]["tools"]}
+            self.assertEqual(names, {"fennec_status", "fennec_chat", "fennec_list_dir",
+                                     "fennec_read_file", "fennec_grep"})
+            self.assertNotIn("run_shell", names)
+
+    def test_mcp_read_tools_are_jailed_and_chat_is_direct(self):
+        token = "nod-test"
+        self.engine.reply = {"role": "assistant", "content": f"answer {token}"}
+        with mock.patch.dict(os.environ, {"FENNEC_MCP_TOKEN": token}, clear=True):
+            listing = self.mcp("tools/call", {"name": "fennec_list_dir", "arguments": {}}).json()
+            self.assertTrue(listing["result"]["structuredContent"]["ok"])
+            self.assertEqual(self.mcp("tools/call", {"name": "fennec_read_file",
+                                                       "arguments": {"path": "src/app.py"}}).json()
+                             ["result"]["structuredContent"]["content"], "print('hi')\n")
+            grep_result = self.mcp("tools/call", {"name": "fennec_grep",
+                                                   "arguments": {"pattern": "print"}}).json()
+            self.assertEqual(grep_result["result"]["structuredContent"]["count"], 1)
+            escaped = self.mcp("tools/call", {"name": "fennec_read_file",
+                                               "arguments": {"path": "../outside"}}).json()
+            self.assertTrue(escaped["result"]["isError"])
+            chat = self.mcp("tools/call", {"name": "fennec_chat",
+                                            "arguments": {"prompt": "hello"}}).json()
+            self.assertEqual(chat["result"]["structuredContent"]["answer"], "answer [redacted]")
+            self.assertEqual(self.engine.calls[-1]["messages"],
+                             [{"role": "user", "content": "hello"}])
+
+    def test_mcp_rejects_write_shell_and_unknown_tools(self):
+        with mock.patch.dict(os.environ, {"FENNEC_MCP_TOKEN": "nod-test"}, clear=True):
+            for name in ("write_file", "run_shell", "no_such_tool"):
+                response = self.mcp("tools/call", {"name": name, "arguments": {}}).json()
+                self.assertTrue(response["result"]["isError"])
+            notification = self.client.post("/mcp", headers={"Authorization": "Bearer nod-test"},
+                                             json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+            self.assertEqual(notification.status_code, 202)
+
+
 class FileTests(ClientCase):
     def test_listing_contract(self):
         data = self.client.get("/api/files", headers=HEADERS).json()

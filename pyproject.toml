@@ -22,6 +22,7 @@ stt = ["faster-whisper==1.2.1", "av>=14,<18"]  # PyAV 18+ removed metadata_error
 # Only materialising converted tensors needs numpy; classifying a folder and planning the
 # conversion stay stdlib, so a machine that never converts pays nothing for it.
 convert = ["numpy>=1.24"]
+antigravity = ["google-antigravity>=0.1.24"]
 
 [project.scripts]
 fennec-agent = "server:main"
@@ -32,6 +33,6 @@ fennec-convert = "convert:main"
 [tool.setuptools]
 py-modules = [
   "acp", "config", "context", "convert", "engine", "events", "liquid",
-  "loop", "mcp", "outlets", "preflight", "rust_bridge", "server", "setup_wizard",
+  "loop", "mcp", "mcp_server", "outlets", "preflight", "rust_bridge", "server", "setup_wizard",
   "snapshot", "stt", "te_bridge", "tools", "updater", "version", "web_driver", "webagent",
 ]

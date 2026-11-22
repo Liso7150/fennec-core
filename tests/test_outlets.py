@@ -151,9 +151,10 @@ class OutletCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def outlets(self, environ=None, openbot_url="", suite_root=None):
+    def outlets(self, environ=None, openbot_url="", suite_root=None, workspace=None):
         config = SimpleNamespace(openbot_url=openbot_url,
-                                 suite_root=str(self.root) if suite_root is None else suite_root)
+                                 suite_root=str(self.root) if suite_root is None else suite_root,
+                                 workspace=str(self.root if workspace is None else workspace))
         return Outlets(config, environ or {})
 
 
@@ -538,8 +539,9 @@ class FennecWebTests(OutletCase):
         with self.capable(""), mock.patch.object(
                 urllib.request, "build_opener", return_value=FakeOpener([json_body([])])):
             status = self.outlets().status(refresh=True)
-        self.assertEqual(sorted(status), ["fennec", "openbot"])
+        self.assertEqual(sorted(status), ["antigravity", "fennec", "openbot"])
         self.assertFalse(status["fennec"]["present"])
+        self.assertFalse(status["antigravity"]["present"])
 
     def test_web_task_is_advertised_only_when_both_halves_stand(self):
         """An interpreter with no key and a key with no interpreter are both no browser tool."""
@@ -680,6 +682,77 @@ class DriverContractTests(unittest.TestCase):
                                              marker), {"ok": True})
 
 
+class AntigravityTests(OutletCase):
+    class Policy:
+        @staticmethod
+        def deny_all():
+            return ("deny-all",)
+
+        @staticmethod
+        def allow(name):
+            return ("allow", name)
+
+    class Response:
+        def __init__(self, text):
+            self.value = text
+
+        async def text(self):
+            return self.value
+
+    class Agent:
+        box = {}
+
+        def __init__(self, config):
+            self.config = config
+            self.box["config"] = config
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def chat(self, prompt):
+            self.box["prompt"] = prompt
+            self.box["listing"] = self.config.tools[0](".")
+            return AntigravityTests.Response("answer gemini-secret")
+
+    def sdk(self):
+        module = SimpleNamespace(Agent=self.Agent,
+                                 LocalAgentConfig=lambda **kwargs: SimpleNamespace(**kwargs))
+        return module, self.Policy
+
+    def test_status_is_unavailable_without_the_optional_sdk(self):
+        outlet = self.outlets({"GEMINI_API_KEY": "gemini-secret"})
+        with mock.patch.object(outlets_mod, "_antigravity_sdk", return_value=None):
+            state = outlet.antigravity_status(refresh=True)
+        self.assertFalse(state["present"])
+        self.assertFalse(state["installed"])
+        self.assertNotIn("gemini-secret", json.dumps(state))
+
+    def test_task_uses_only_jailed_read_tools_and_redacts_credentials(self):
+        self.Agent.box = {}
+        outlet = self.outlets({"GEMINI_API_KEY": "gemini-secret"})
+        with mock.patch.object(outlets_mod, "_antigravity_sdk", return_value=self.sdk()):
+            report = outlet.antigravity_task("inspect this workspace")
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["outlet"], "antigravity")
+        self.assertEqual(report["tools"], ["list_dir", "read_file", "grep"])
+        self.assertEqual(self.Agent.box["prompt"], "inspect this workspace")
+        self.assertTrue(self.Agent.box["listing"]["ok"])
+        self.assertNotIn("gemini-secret", json.dumps(report))
+        policies = self.Agent.box["config"].policies
+        self.assertEqual(policies[0], ("deny-all",))
+        self.assertEqual(policies[1:], [("allow", "list_dir"), ("allow", "read_file"), ("allow", "grep")])
+
+    def test_status_requires_a_configured_workspace_and_credential(self):
+        outlet = self.outlets({}, workspace=self.root / "missing")
+        with mock.patch.object(outlets_mod, "_antigravity_sdk", return_value=self.sdk()):
+            state = outlet.antigravity_status(refresh=True)
+        self.assertFalse(state["present"])
+        self.assertIn("GEMINI_API_KEY", state["error"])
+
+
 class OpenBotProbeTests(OutletCase):
     def test_agents_list_is_read_from_the_ag_ui_routes(self):
         opener = FakeOpener([json_body([{"id": "a1", "name": "Ivy"}, {"id": "a2", "name": "Otto"}])])
@@ -721,8 +794,9 @@ class OpenBotProbeTests(OutletCase):
              mock.patch.object(urllib.request, "build_opener",
                                return_value=FakeOpener([json_body([{"id": "a1", "name": "Ivy"}])])):
             status = self.outlets({"LIQUID_API_KEY": "liquid-live"}).status(refresh=True)
-        self.assertEqual(sorted(status), ["fennec", "openbot"])
+        self.assertEqual(sorted(status), ["antigravity", "fennec", "openbot"])
         self.assertTrue(status["fennec"]["present"])
+        self.assertFalse(status["antigravity"]["present"])
         self.assertTrue(status["openbot"]["present"])
         self.assertEqual(status["openbot"]["url"], outlets_mod.OPENBOT_DEFAULT)
 

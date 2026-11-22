@@ -1,4 +1,4 @@
-![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2024, 517 Python tests, 5 Rust crates, 54 Rust tests, MIT license.](docs/hero.png)
+![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2024, 525 Python tests, 5 Rust crates, 54 Rust tests, MIT license.](docs/hero.png)
 
 ---
 
@@ -6,9 +6,9 @@
 
 | Python tests | Rust tests | Rust crates | Python modules | Runtime deps | `fennec-rs` binary |
 |:---:|:---:|:---:|:---:|:---:|:---:|
-| 517 in 14 files | 54 in 5 crates | 5 | 16 | 4 | ≈ 1.9 MB |
+| 525 in 14 files | 54 in 5 crates | 5 | 16 | 4 | ≈ 1.9 MB |
 
-Counts measured on 2026-11-21 from `tests/` (517 collected, 1 skipped) and `src/` (5 crates). Binary size measured from
+Counts measured on 2026-11-22 from `tests/` (525 collected, 1 skipped) and `src/` (5 crates). Binary size measured from
 `fennec-cli/target/release/fennec-rs.exe` (Windows x64 `cargo build --release --offline`, 1,897,180 bytes at 1.0.0).
 
 One reference implementation for the desktop, coding-agent and JetBrains apps. Pure logic is
@@ -46,6 +46,7 @@ Requires Python 3.10+.
 ```bash
 python -m pip install -e .            # core
 python -m pip install -e ".[stt]"     # + local speech transcription
+python -m pip install -e ".[antigravity]" # + Google Antigravity outlet
 python -m pip install -e ".[dev]"     # + httpx for the test client
 ```
 
@@ -53,7 +54,13 @@ python -m pip install -e ".[dev]"     # + httpx for the test client
 |---|---|---|
 | runtime | `fastapi`, `uvicorn`, `psutil`, `pydantic` | service, process supervision, validation |
 | `stt` | `faster-whisper==1.2.1`, `av>=14,<18` | PyAV 18+ broke faster-whisper 1.2.1's `metadata_errors` |
+| `antigravity` | `google-antigravity>=0.1.24` | optional Google agent outlet |
 | `dev` | `httpx>=0.27` | test client |
+
+The Antigravity outlet is off unless `google-antigravity` is installed, `GEMINI_API_KEY`
+(or Vertex AI environment variables) is configured, and `FENNEC_WORKSPACE` points to an
+existing directory. It exposes only Fennec's jailed `list_dir`, `read_file`, and `grep`
+tools; Antigravity's built-in shell and filesystem tools are denied.
 
 ## Quick start
 
@@ -68,6 +75,34 @@ at `/`. The engine listens on `127.0.0.1:8184`, started only when a message need
 > A non-loopback bind requires an app token (`FENNEC_APP_TOKEN`) **and** TLS in front of the
 > service. Host and Origin are checked on every request; plain LAN HTTP is refused.
 
+### Connect n8n Nod
+
+Fennec can expose a private, read-only MCP connector for Nod. It is disabled unless you set a
+separate token before starting the service:
+
+```bash
+export FENNEC_MCP_TOKEN=use-a-long-random-value
+fennec-agent serve --host 127.0.0.1 --port 8787
+```
+
+In Nod, open **Connect → MCP**, choose a private/local server, and enter the Fennec MCP address
+`http://127.0.0.1:8787/mcp` with the same bearer token. The connector exposes only Fennec status,
+jailed workspace listing, jailed file reading, jailed grep, and direct local-model chat. It does
+not expose shell, Python, file writes, browser automation, coworker delegation, or the bounded
+agent loop. Host and Origin checks still apply, and all tool responses are redacted through Fennec's
+secret filter.
+
+This integration is a Python HTTP protocol endpoint; it does not embed Nod and adds no Node.js or
+Electron dependency to Fennec. Nod remains a separate application that connects through its normal
+MCP connector flow.
+
+### Obsidian status
+
+Obsidian is not integrated yet. If a connector is added, it belongs in `fennec-core` as an explicit,
+opt-in boundary around a configured vault, starting with read-only access. Fennec will not embed
+Obsidian, Node.js, Electron, or a plugin runtime; vault writes and any API credentials require a
+separate approval and secret-storage design.
+
 ### Subcommands
 
 | Command | What it does |
@@ -77,7 +112,7 @@ at `/`. The engine listens on `127.0.0.1:8184`, started only when a message need
 | `fennec-agent chat <prompt>` | one-shot chat against the engine |
 | `fennec-agent agent <task>` | bounded tool loop (`--allow-write`, `--allow-shell`, `--allow-web`, `--max-steps`) |
 | `fennec-agent acp` | speak ACP v1 on stdio; `--check` reports what is advertised |
-| `fennec-agent outlets` | status of the optional outlets: Fennec's own d1.2 loop, OpenBot |
+| `fennec-agent outlets` | status of the optional outlets: Fennec's own d1.2 loop, OpenBot, Antigravity |
 
 Reasoning pass-through (`reasoning_effort` / `enable_thinking`, `reasoning_content` deltas)
 and one validated `data:image/...;base64` vision part per request are supported. Tools are
@@ -92,7 +127,7 @@ read-only by default; the speech sidecar (faster-whisper, CPU) sits behind `POST
 | `loop.py` | bounded agent loop: tool-call accumulation, result feedback, step cap |
 | `tools.py` | read / edit / grep / run / git inside a workspace jail, plus optional NPU semantic search |
 | `context.py` | payload compaction: head+tail elision, dedup, total budget |
-| `outlets.py` | outlet gates (`web_task` on Fennec's own loop, `coworker_task` on OpenBot), interpreter and transport discovery, host allow-list, secret redaction |
+| `outlets.py` | outlet gates (`web_task`, `coworker_task`, and optional `antigravity_task`), interpreter and transport discovery, workspace jail, host allow-list, secret redaction |
 | `mcp.py` | MCP server pool |
 | `preflight.py` | weights + peak KV cache against this machine's memory |
 | `server.py` | FastAPI app, routes, static PWA mount, loopback guards |
@@ -197,7 +232,7 @@ fennec setup --yes --install-deps                  # pip install missing core de
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v     # 517 tests across 14 files, 1 skipped
+python -m unittest discover -s tests -v     # 525 tests across 14 files, 1 skipped
 cd src && cargo test --release --offline    # 54 tests across 14 suites
 ```
 
