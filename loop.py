@@ -37,8 +37,10 @@ _LOCK = threading.Lock()
 # there is rendered or dropped, never a reason to stop watching the run.
 # `progress` is a tool saying what it is inside while it runs, so it carries a
 # `call_id` and belongs to the call it reports on rather than being a step of work.
-STEP_TYPES = ("plan", "assistant", "partial", "tool_start", "progress", "tool", "queue",
-              "final", "error", "cancelled", "approval_required")
+# `reasoning` is the model's own thinking, published while it happens rather than
+# when the turn ends: see `_Thoughts`.
+STEP_TYPES = ("plan", "reasoning", "assistant", "partial", "tool_start", "progress", "tool",
+              "queue", "final", "error", "cancelled", "approval_required")
 
 # The plan these shells show is read back from the tool calls the loop actually
 # made, never from a model-authored list. `_publish_plan` puts the same list on
@@ -364,6 +366,49 @@ def _emit(sid, event):
         session["steps"].append(event)
 
 
+# A thinking block is the model's own words, and a shell that only receives them
+# when the turn completes shows a run that has been reasoning for a minute as
+# though it had stopped. The deltas therefore reach the durable log too, in
+# pieces: one step per this many characters, or once the stream has been quiet
+# this long, so a client that polls about a step a second sees the thought grow
+# without the log paying one step per token.
+THOUGHT_FLUSH_CHARS = 400
+THOUGHT_FLUSH_S = 0.4
+
+
+class _Thoughts:
+    """Coalesce one turn's reasoning deltas into bounded steps on the log.
+
+    ``part`` numbers the pieces from zero. A poller addresses steps by index and
+    the log holds 1000 of them per session, so a long think can lose its head;
+    the counter is how a shell knows a piece is missing instead of showing half a
+    thought as the whole one. The turn's ``assistant`` step still carries the
+    block entire, which is what a client that fell behind replaces its copy with.
+    """
+
+    def __init__(self, sid):
+        self.sid = sid
+        self.buf = ""
+        self.part = 0
+        self.at = time.monotonic()
+
+    def feed(self, text):
+        if not text:
+            return
+        self.buf += text
+        if (len(self.buf) >= THOUGHT_FLUSH_CHARS
+                or time.monotonic() - self.at >= THOUGHT_FLUSH_S):
+            self.flush()
+
+    def flush(self):
+        if not self.buf:
+            return
+        _emit(self.sid, {"type": "reasoning", "text": self.buf, "part": self.part})
+        self.part += 1
+        self.buf = ""
+        self.at = time.monotonic()
+
+
 def _pending_ids(session) -> list:
     """The approvals this session is waiting on, oldest first. Call it holding
     `_LOCK`: it reads the same records `resolve_approval` writes."""
@@ -493,7 +538,9 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
     """Drive one agent turn.
 
     ``sink(event)`` receives live ``text`` / ``reasoning`` / ``plan`` events and
-    needs ``stream=True`` for token deltas. ``approve(name, args)`` returns an
+    needs ``stream=True`` for token deltas. Streaming also publishes the thought
+    to ``session["steps"]``, coalesced by :class:`_Thoughts`, so a client that can
+    only poll watches the model reason instead of waiting for the turn to finish. ``approve(name, args)`` returns an
     ACP permission option (allow_once, allow_always, reject_once,
     reject_always) and, when present, gated tools are advertised and confirmed
     at call time instead of hidden by session flags. A session opened with
@@ -569,17 +616,23 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
             finish = None
             if stream and hasattr(client, "chat_stream"):
                 msg = None
+                thoughts = _Thoughts(sid)
                 for event in client.chat_stream(payload, tools=tools, abort=lambda: _cancelled(sid),
                                                 **think_kw):
                     if event["type"] == "result":
                         msg, usage = event["message"], event["usage"]
                         finish = event.get("finish_reason")
                         if event.get("cancelled") or finish == "cancelled":
+                            thoughts.flush()
                             _emit(sid, {"type": "partial", "content": (msg or {}).get("content", "")})
                             _finish(sid, "cancelled")
                             return
-                    elif sink is not None and event["type"] in ("text", "reasoning"):
-                        sink({"type": event["type"], "text": event["text"]})
+                    elif event["type"] in ("text", "reasoning"):
+                        if sink is not None:
+                            sink({"type": event["type"], "text": event["text"]})
+                        if event["type"] == "reasoning":
+                            thoughts.feed(event["text"])
+                thoughts.flush()
                 if msg is None:
                     raise engine.EngineError("engine stream produced no result")
             else:
@@ -1152,7 +1205,14 @@ def _args(tc):
         return {}
 
 
-def start_thread(sid, max_steps=14):
-    th = threading.Thread(target=run_agent, args=(sid, max_steps), daemon=True)
+def start_thread(sid, max_steps=14, *, stream=True):
+    """Run one turn on its own thread, the way an HTTP client consumes it.
+
+    Every caller here is a poller, and a session driven through
+    `/api/agent/poll` has no channel but the step log: with the deltas left out
+    of it, a run looks frozen for exactly as long as the model spends thinking.
+    """
+    th = threading.Thread(target=run_agent, args=(sid, max_steps),
+                          kwargs={"stream": stream}, daemon=True)
     th.start()
     return th

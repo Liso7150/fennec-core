@@ -239,6 +239,7 @@ class AgUiStream:
         self.after = 0
         self._counter = 0
         self._text = ""
+        self._reason: str | None = None
         self._open: list = []
 
     def _id(self, prefix):
@@ -259,6 +260,17 @@ class AgUiStream:
         pending, self._open = self._open, []
         return [self._result(call_id, AGUI_UNFINISHED) for call_id in pending]
 
+    def close_reasoning(self):
+        """End the thinking block a live chunk opened, when one is open.
+
+        A client waits on an unclosed block the way it waits on an unanswered
+        tool call, and a thought streamed in pieces has no other end mark."""
+        message_id, self._reason = self._reason, None
+        if message_id is None:
+            return []
+        return [{"type": "REASONING_MESSAGE_END", "messageId": message_id},
+                {"type": "REASONING_END"}]
+
     def _message(self, text):
         if not text:
             return []
@@ -271,7 +283,7 @@ class AgUiStream:
         return [{"type": "RUN_STARTED", "threadId": self.thread_id, "runId": self.run_id}]
 
     def finish(self, state):
-        events = self.close_tools()
+        events = self.close_tools() + self.close_reasoning()
         stop = state.get("stop")
         if not isinstance(stop, str):
             # cancel() marks the session cancelled before the worker can name a
@@ -283,10 +295,24 @@ class AgUiStream:
 
     def feed(self, step) -> list:
         kind = step.get("type")
-        if kind == "assistant":
+        if kind == "reasoning":
+            text = step.get("text") or ""
+            if not text:
+                return []
             events = []
+            if self._reason is None:
+                self._reason = self._id("reasoning")
+                events += [{"type": "REASONING_START"},
+                           {"type": "REASONING_MESSAGE_START", "messageId": self._reason,
+                            "role": "assistant"}]
+            return events + [{"type": "REASONING_MESSAGE_CONTENT", "messageId": self._reason,
+                              "delta": text}]
+        if kind == "assistant":
+            events = self.close_reasoning()
             reasoning = step.get("reasoning") or ""
-            if reasoning.strip():
+            if not events and reasoning.strip():
+                # No piece of this thought reached the stream, which is what a
+                # non-streaming session does: hand the block over whole instead.
                 message_id = self._id("reasoning")
                 events += [{"type": "REASONING_START"},
                            {"type": "REASONING_MESSAGE_START", "messageId": message_id,
@@ -783,11 +809,17 @@ def main(argv=None):
             print(f"fennec-agent: cannot start task: {exc}", file=sys.stderr)
             return 2
         sid, after = started["id"], 0
+        thought = False
         import time
         while True:
             state = _http("GET", f"{base}/api/agent/poll?id={sid}&after={after}")
             for step in state["steps"]:
                 kind = step.get("type")
+                if thought and kind != "reasoning":
+                    # The thought ran onto the line; whatever the run says next
+                    # starts on its own.
+                    print()
+                    thought = False
                 if kind == "tool":
                     print(f"[tool] {step.get('name')} -> {'ok' if step.get('ok') else 'failed'}")
                 elif kind == "tool_start":
@@ -799,6 +831,12 @@ def main(argv=None):
                     done = sum(1 for e in step.get("entries", []) if e.get("status") == "completed")
                     print(f"[plan] {done}/{len(step.get('entries', []))} "
                           f"{' · '.join(e.get('content', '') for e in step.get('entries', []))}")
+                elif kind == "reasoning":
+                    # One running line, not a bracketed row per piece: the model
+                    # is thinking out loud, and the pieces are just how far the
+                    # poll happened to catch it.
+                    print(step.get("text", ""), end="", flush=True)
+                    thought = True
                 elif kind in ("assistant", "final", "error", "cancelled", "partial"):
                     print(f"[{kind}] {step.get('content', '')}")
             after = state["total"]

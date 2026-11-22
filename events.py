@@ -48,9 +48,14 @@ class TextEvent:
 
 @dataclass(frozen=True)
 class ReasoningEvent:
-    """A reasoning/thinking chunk (used by the sink channel)."""
+    """A reasoning/thinking chunk.
+
+    The sink channel sends the model's thought as one event per turn; the step
+    log sends it in bounded pieces while the model is still having it, which is
+    what ``part`` numbers (see ``loop._Thoughts``)."""
     type: Literal["reasoning"] = "reasoning"
     text: str = ""
+    part: int = 0
     i: int = 0
     t: float = 0.0
 

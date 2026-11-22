@@ -576,7 +576,13 @@ class Engine:
             else:
                 script = Path(__file__).with_name("stt.py")
                 if not script.is_file():
-                    raise EngineError("Speech sidecar is not installed")
+                    # A core started before the package was flattened looks for
+                    # stt.py inside fennec_core/, so "not installed" is a lie
+                    # unless the searched path is shown with it.
+                    raise EngineError(
+                        f"Speech sidecar is not installed: no stt.py next to {__file__}. "
+                        "Update fennec-core and restart the service."
+                    )
                 python, options = spawn_options(self.config.python)
                 self.stt_log_path.parent.mkdir(parents=True, exist_ok=True)
                 env = self._engine_env()  # carries HF_HOME so the model lands in cache_root
