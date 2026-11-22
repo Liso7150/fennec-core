@@ -5,6 +5,7 @@ members = [
     "fennec-client",
     "fennec-outlets",
     "fennec-preflight",
+    "fennec-workspace-tools",
     "fennec-pyjson",
 ]
 

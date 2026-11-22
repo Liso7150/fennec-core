@@ -337,9 +337,14 @@ impl Suite {
         PathBuf::from(if cfg!(windows) { "fennec.exe" } else { "fennec" })
     }
 
-    /// The checkout that can serve the agent API, when present.
+    /// The checkout that serves legacy compatibility routes, when present.
     pub fn core_dir(&self) -> Option<PathBuf> {
         self.repos.iter().find(|r| r.name == "fennec-core").map(|r| r.path.clone())
+    }
+
+    /// The checkout that owns the canonical Rust agent service, when present.
+    pub fn agent_dir(&self) -> Option<PathBuf> {
+        self.repos.iter().find(|r| r.name == "fennec-coding-agent").map(|r| r.path.clone())
     }
 
     pub fn python() -> Option<String> {
@@ -351,15 +356,16 @@ impl Suite {
         None
     }
 
-    /// Launch the agent service the owning repo defines: the `fennec-agent`
-    /// console script when installed, otherwise `python -m server`.
-    /// `serve` is a required subcommand (`server.py:main`), host/port default to
-    /// 127.0.0.1:8787. Best effort: false means "still unavailable", not a lie.
+    /// Launch the canonical Rust agent service from its checkout, then an
+    /// installed Rust command. Python remains an explicit compatibility fallback
+    /// only when no Rust service can be started.
+    /// Best effort: false means "still unavailable", not a lie.
     pub fn serve(&self, port: u16) -> bool {
         let py = Suite::python();
         for attempt in self.serve_commands(py.as_deref(), port) {
             let mut cmd = std::process::Command::new(&attempt[0]);
             cmd.args(&attempt[1..]);
+            cmd.env("FENNEC_AGENT_ADDR", format!("127.0.0.1:{port}"));
             if let Some(core) = self.core_dir() {
                 cmd.current_dir(core);
             }
@@ -371,7 +377,10 @@ impl Suite {
             }
             for _ in 0..48 {
                 std::thread::sleep(Duration::from_millis(250));
-                if crate::agent::Core::new().health().is_some() {
+                let health = crate::coding_agent::CodingAgentClient::with_base(
+                    format!("http://127.0.0.1:{port}"),
+                ).health();
+                if health.as_ref().is_some_and(|v| v["backend"] == "rust-axum") {
                     return true;
                 }
             }
@@ -382,6 +391,16 @@ impl Suite {
 
     fn serve_commands(&self, py: Option<&str>, port: u16) -> Vec<Vec<String>> {
         let mut out = Vec::new();
+        if let Some(agent) = self.agent_dir() {
+            let binary = if cfg!(windows) { "fennec-agent.exe" } else { "fennec-agent" };
+            for rel in ["target/release", "target/debug"] {
+                let path = agent.join(rel).join(binary);
+                if path.is_file() {
+                    out.push(vec![path.to_string_lossy().into_owned(), "serve".into(),
+                                  "--host".into(), "127.0.0.1".into(), "--port".into(), port.to_string()]);
+                }
+            }
+        }
         if git::which("fennec-agent").is_some() {
             out.push(vec!["fennec-agent".into(), "serve".into(), "--host".into(), "127.0.0.1".into(), "--port".into(), port.to_string()]);
         }

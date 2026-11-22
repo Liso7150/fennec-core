@@ -60,6 +60,36 @@ pub struct SseEvent {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackendCapabilities {
+    pub backend: String,
+    pub implementation: String,
+    pub protocol_version: u32,
+    pub version: String,
+    pub features: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct GithubAccount {
+    pub login: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub html_url: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct GithubAccountStatus {
+    pub authenticated: bool,
+    pub account: Option<GithubAccount>,
+    pub error: Option<String>,
+}
+
+impl BackendCapabilities {
+    pub fn supports(&self, feature: &str) -> bool {
+        self.features.iter().any(|candidate| candidate == feature)
+    }
+}
+
 #[derive(Clone)]
 pub struct CodingAgentClient {
     pub base: String,
@@ -78,16 +108,23 @@ impl CodingAgentClient {
     }
 
     fn get(&self, route: &str) -> Result<Value, String> {
-        http::get_json(&self.base, route, &[])
+        http::get_json(&self.base, route, &[("X-Fennec-Client", "1")])
     }
 
     fn post(&self, route: &str, body: &Value) -> Result<Value, String> {
-        http::post_json(&self.base, route, &[], body)
+        http::post_json(&self.base, route, &[("X-Fennec-Client", "1")], body)
     }
 
     /// Check if the coding-agent backend is reachable.
     pub fn health(&self) -> Option<Value> {
         self.get("/health").ok()
+    }
+
+    /// Identify the Rust backend and its supported protocol features.
+    pub fn capabilities(&self) -> Option<BackendCapabilities> {
+        self.get("/api/capabilities")
+            .ok()
+            .and_then(|value| serde_json::from_value(value).ok())
     }
 
     /// List all tasks.
@@ -127,7 +164,7 @@ impl CodingAgentClient {
     pub fn delete_task(&self, id: &str) -> Result<(), String> {
         let (host, _) = http::split_base(&self.base);
         let mut s = http::connect(&self.base, Duration::from_secs(4))?;
-        http::write_request(&mut s, &host, "DELETE", &format!("/api/tasks/{id}"), &[], None)?;
+        http::write_request(&mut s, &host, "DELETE", &format!("/api/tasks/{id}"), &[("X-Fennec-Client", "1")], None)?;
         let (status, _) = http::read_response(&mut s)?;
         if status == 204 || status == 200 {
             Ok(())
@@ -161,6 +198,18 @@ impl CodingAgentClient {
             .ok()
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default()
+    }
+
+    /// Read the local GitHub CLI authentication state.
+    pub fn github_account(&self) -> GithubAccountStatus {
+        self.get("/api/github/account")
+            .ok()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_else(|| GithubAccountStatus {
+                authenticated: false,
+                account: None,
+                error: Some("GitHub status unavailable".into()),
+            })
     }
 
     /// Delegate work to another agent.
@@ -205,7 +254,7 @@ impl CodingAgentClient {
         cancel: &AtomicBool,
         mut on_event: impl FnMut(SseEvent),
     ) -> Result<(), String> {
-        http::read_sse(&self.base, "/api/events", &[], cancel, |data| {
+        http::read_sse(&self.base, "/api/events", &[("X-Fennec-Client", "1")], cancel, |data| {
             if let Ok(ev) = serde_json::from_str::<SseEvent>(data) {
                 on_event(ev);
             }
@@ -265,5 +314,19 @@ mod tests {
         let ev: SseEvent = serde_json::from_str(json).unwrap();
         assert_eq!(ev.event_type, "TaskCreated");
         assert_eq!(ev.task_id, Some("t1".into()));
+    }
+
+    #[test]
+    fn capabilities_report_supported_features() {
+        let caps: BackendCapabilities = serde_json::from_value(serde_json::json!({
+            "backend": "fennec-coding-agent",
+            "implementation": "rust-axum",
+            "protocol_version": 1,
+            "version": "1.0.0",
+            "features": ["tasks", "events-sse"]
+        })).unwrap();
+        assert!(caps.supports("tasks"));
+        assert!(caps.supports("events-sse"));
+        assert!(!caps.supports("events-websocket"));
     }
 }

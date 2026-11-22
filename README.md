@@ -1,4 +1,4 @@
-![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2024, 525 Python tests, 5 Rust crates, 54 Rust tests, MIT license.](docs/hero.png)
+![Fennec Core 1.0.0 — the Python orchestration service behind the Fennec suite: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and core-owned connectors. The supported coding-agent PWA front door is the separate Rust/Axum fennec-agent.](docs/hero.png)
 
 ---
 
@@ -16,14 +16,20 @@ also ported to a six-crate Rust workspace that the Python side can delegate to.
 
 ## Architecture
 
+The supported coding-agent browser entry point is the separate Rust/Axum
+[`fennec-agent`](https://github.com/Liso7150/fennec-coding-agent), which serves the PWA and
+its API on `127.0.0.1:8787` and falls back to `127.0.0.1:8788` when that port is occupied.
+This repository remains the Python orchestration boundary used by the agent loop, ACP,
+engine supervision, and optional connectors:
+
 ```
- PWA / HTTP clients               Editors (ACP v1, stdio)
+ Rust/Axum fennec-agent               Editors (ACP v1, stdio)
         │                                 │
-        ▼                                 ▼
-   server.py ◄─────────────────────── acp.py
-   FastAPI + loopback guards              │
-        │                                 │
-        ▼                                 ▼
+        └───────────────┬─────────────────┘
+                        ▼
+          Python fennec-core when selected
+                        │
+                        ▼
    loop.py ── bounded agent loop, step cap, write/shell approvals
         │
         ├── tools.py ──── read / edit / grep / run / git inside a workspace jail
@@ -64,12 +70,23 @@ tools; Antigravity's built-in shell and filesystem tools are denied.
 
 ## Quick start
 
+For the supported coding-agent PWA, build and run the Rust/Axum server from
+[`fennec-coding-agent`](https://github.com/Liso7150/fennec-coding-agent):
+
 ```bash
-fennec-agent serve --host 127.0.0.1 --port 8787
+cargo build --release --offline
+./target/release/fennec-agent
 ```
 
-Serves the HTTP API and mounts the [coding-agent PWA](https://github.com/Liso7150/fennec-coding-agent)
-at `/`. The engine listens on `127.0.0.1:8184`, started only when a message needs it.
+It serves the PWA and API on `127.0.0.1:8787`, falling back to `127.0.0.1:8788` when needed.
+The Python core service remains available when a core-specific route or legacy integration
+requires it:
+
+```bash
+python -m fennec_core.server serve --host 127.0.0.1 --port <free-port>
+```
+
+The engine listens on `127.0.0.1:8184`, started only when a message needs it.
 
 > [!IMPORTANT]
 > A non-loopback bind requires an app token (`FENNEC_APP_TOKEN`) **and** TLS in front of the
@@ -130,7 +147,7 @@ read-only by default; the speech sidecar (faster-whisper, CPU) sits behind `POST
 | `outlets.py` | outlet gates (`web_task`, `coworker_task`, and optional `antigravity_task`), interpreter and transport discovery, workspace jail, host allow-list, secret redaction |
 | `mcp.py` | MCP server pool |
 | `preflight.py` | weights + peak KV cache against this machine's memory |
-| `server.py` | FastAPI app, routes, static PWA mount, loopback guards |
+| `server.py` | Separate Python core service, routes, loopback guards, and legacy/static integrations |
 | `stt.py` | faster-whisper transcription sidecar on `127.0.0.1:8183` |
 | `rust_bridge.py` | optional delegation to the Rust crates |
 | `config.py` | the shared config contract: `~/.fennec/config.json` with `FENNEC_*` overrides |

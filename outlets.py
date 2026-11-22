@@ -51,6 +51,8 @@ LANE_GRACE_S = 15.0
 SECRET_ENV_KEYS = ("FENNEC_API_KEY", "COLI_API_KEY", "FENNEC_APP_TOKEN", "FENNEC_MCP_TOKEN",
                    "LIQUID_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
                    "GOOGLE_APPLICATION_CREDENTIALS")
+BROWSER_PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                          "http_proxy", "https_proxy", "all_proxy", "NODE_USE_ENV_PROXY")
 WEB_REPORT_BYTES = 200_000
 ANTIGRAVITY_TIMEOUT_S = 900
 WEB_ERROR_BYTES = 60_000
@@ -603,10 +605,12 @@ class Outlets:
     def _fennec_command(self, python, url, goal, max_steps, timeout):
         driver = str(Path(__file__).with_name("web_driver.py"))
         # The loop is first-party, so it gets this whole environment: it needs the Liquid key
-        # to decide an action and the engine credentials to word one. Only the proxy bypass is
-        # rewritten on the way, because the transport builds its HTTP client while it is being
-        # imported and a bracketed "[::1]" in that list stops the lane before the page.
+        # to decide an action and the engine credentials to word one. Proxy settings belong to
+        # the caller's browser session; passing an authenticated proxy into the child makes
+        # Firefox stop on a username/password prompt before the page can load.
         env = dict(self.env)
+        for name in BROWSER_PROXY_ENV_KEYS:
+            env.pop(name, None)
         for name in ("NO_PROXY", "no_proxy"):
             if env.get(name):
                 env[name] = _bypass_list(env[name])

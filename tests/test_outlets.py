@@ -300,6 +300,20 @@ class FennecWebTests(OutletCase):
             self.loop_outlet().web_task("open the page")
         self.assertNotIn("NO_PROXY", plain["env"], "no bypass is invented for a machine that has none")
 
+    def test_authenticated_proxy_variables_do_not_reach_the_browser_child(self):
+        proxy = "http://user:password@127.0.0.1:51651"
+        environ = {name: proxy for name in (
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+            "http_proxy", "https_proxy", "all_proxy",
+        )}
+        environ["NODE_USE_ENV_PROXY"] = "1"
+        box, patch = fake_driver(stdout=web_stdout({"ok": True}))
+        with self.capable(), patch:
+            self.loop_outlet(environ).web_task("open the page")
+        for name in outlets_mod.BROWSER_PROXY_ENV_KEYS:
+            self.assertNotIn(name, box["env"])
+        self.assertEqual(box["env"]["LIQUID_API_KEY"], "liquid-live")
+
     def test_no_key_declines_without_starting_a_process(self):
         with self.capable(), mock.patch.object(outlets_mod.subprocess, "Popen") as spawn:
             report = self.outlets().web_task("open the page")
