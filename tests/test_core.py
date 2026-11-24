@@ -200,6 +200,61 @@ class SecurityTests(ClientCase):
         self.assertEqual(closed, [True])
 
 
+class CapabilitiesTests(ClientCase):
+    EXPECTED = {
+        "backend": "fennec-core",
+        "implementation": "python-supervised-loop",
+        "protocol_version": 1,
+        "version": "1.0.0",
+        "features": [
+            "supervised-agent",
+            "tool-execution",
+            "per-call-approvals",
+            "agent-polling",
+            "workspace-jail",
+            "workspace-write",
+            "shell-unsandboxed",
+            "pwa-host",
+        ],
+    }
+
+    def test_exact_schema_and_features(self):
+        response = self.client.get("/api/capabilities",
+                                   headers={**HEADERS, "Origin": "http://127.0.0.1"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), self.EXPECTED)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_capabilities_do_not_need_a_running_engine(self):
+        client = TestClient(make_app(self.config, FakeEngine(running=False),
+                                     allowed_hosts=["127.0.0.1"]),
+                            base_url="http://127.0.0.1")
+        response = client.get("/api/capabilities", headers=HEADERS)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), self.EXPECTED)
+
+    def test_client_header_is_required(self):
+        self.assertEqual(self.client.get("/api/capabilities").status_code, 403)
+        self.assertEqual(self.client.get("/api/capabilities", headers=HEADERS).status_code, 200)
+
+    def test_cross_origin_request_is_refused(self):
+        bad = {**HEADERS, "Origin": "http://evil.example"}
+        self.assertEqual(self.client.get("/api/capabilities", headers=bad).status_code, 403)
+
+    def test_non_loopback_host_is_refused(self):
+        response = self.client.get("/api/capabilities",
+                                   headers={**HEADERS, "Host": "evil.example"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_app_token_is_enforced_when_configured(self):
+        with mock.patch.dict(os.environ, {"FENNEC_APP_TOKEN": "s3cret"}):
+            self.assertEqual(self.client.get("/api/capabilities", headers=HEADERS).status_code, 401)
+            wrong = {**HEADERS, "Authorization": "Bearer nope"}
+            self.assertEqual(self.client.get("/api/capabilities", headers=wrong).status_code, 401)
+            good = {**HEADERS, "Authorization": "Bearer s3cret"}
+            self.assertEqual(self.client.get("/api/capabilities", headers=good).status_code, 200)
+
+
 class McpTests(ClientCase):
     def mcp(self, method, params=None, request_id=1, headers=None):
         body = {"jsonrpc": "2.0", "id": request_id, "method": method}

@@ -1,6 +1,7 @@
 //! Client for the fennec-core agent server (`fennec-agent serve`, loopback
 //! 127.0.0.1:8787 by default). Mirrors `server.py`; every route
 //! under `/api/*` except health requires the `X-Fennec-Client: 1` header.
+use crate::coding_agent::BackendCapabilities;
 use crate::http;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -202,6 +203,14 @@ impl Core {
     pub fn health(&self) -> Option<Value> {
         self.get("/api/health").ok()
     }
+
+    /// Core's protocol identity and feature flags. `None` means the service was
+    /// unreachable or did not return the shared capability schema.
+    pub fn capabilities(&self) -> Option<BackendCapabilities> {
+        self.get("/api/capabilities").ok()
+            .and_then(|value| serde_json::from_value(value).ok())
+    }
+
     pub fn engine_status(&self) -> Option<Value> {
         self.get("/api/engine/status").ok()
     }
@@ -290,6 +299,71 @@ impl Default for Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    const CORE_CAPABILITIES: &str = r#"{"backend":"fennec-core","implementation":"python-supervised-loop","protocol_version":1,"version":"1.0.0","features":["supervised-agent","tool-execution","per-call-approvals","agent-polling","workspace-jail","workspace-write","shell-unsandboxed","pwa-host"]}"#;
+
+    fn serve_once(status: &str, body: &str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let response = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len());
+        let request = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            let mut line = String::new();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                request.push_str(&line);
+            }
+            socket.write_all(response.as_bytes()).unwrap();
+            request
+        });
+        (base, request)
+    }
+
+    #[test]
+    fn core_capabilities_deserialize_and_support_the_supervised_conjunction() {
+        let caps: BackendCapabilities = serde_json::from_str(CORE_CAPABILITIES).unwrap();
+        assert_eq!(caps.backend, "fennec-core");
+        assert_eq!(caps.implementation, "python-supervised-loop");
+        assert_eq!(caps.protocol_version, 1);
+        assert_eq!(caps.version, "1.0.0");
+        let required = [
+            "supervised-agent",
+            "tool-execution",
+            "per-call-approvals",
+            "agent-polling",
+            "workspace-jail",
+            "workspace-write",
+        ];
+        assert!(required.iter().all(|feature| caps.supports(feature)));
+        assert!(caps.supports("shell-unsandboxed"));
+        assert!(caps.supports("pwa-host"));
+        assert!(!caps.supports("events-websocket"));
+    }
+
+    #[test]
+    fn core_capabilities_fetch_the_guarded_route() {
+        let (base, request) = serve_once("200 OK", CORE_CAPABILITIES);
+        let caps = Core { base }.capabilities().unwrap();
+        let request = request.join().unwrap();
+        assert!(request.starts_with("GET /api/capabilities HTTP/1.1\r\n"));
+        assert!(request.lines().any(|line| line == "X-Fennec-Client: 1"));
+        assert_eq!(caps.backend, "fennec-core");
+        assert!(caps.supports("supervised-agent"));
+    }
+
+    #[test]
+    fn core_capabilities_are_none_when_the_guard_refuses_the_client() {
+        let (base, request) = serve_once("403 Forbidden", r#"{"detail":"Missing X-Fennec-Client header"}"#);
+        assert!(Core { base }.capabilities().is_none());
+        request.join().unwrap();
+    }
 
     /// The probe verbatim from `outlets.py:_fennec_probe`.
     fn fennec(present: bool, interpreter: Option<&str>, transport: bool, key: bool) -> Value {

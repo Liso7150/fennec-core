@@ -447,6 +447,25 @@ def make_app(config: Config, engine_client=None, allowed_hosts=None) -> FastAPI:
             running = False
         return {"app": "Fennec", "engine_running": running, "workspace": str(config.workspace)}
 
+    @app.get("/api/capabilities")
+    def capabilities():
+        return {
+            "backend": "fennec-core",
+            "implementation": "python-supervised-loop",
+            "protocol_version": 1,
+            "version": "1.0.0",
+            "features": [
+                "supervised-agent",
+                "tool-execution",
+                "per-call-approvals",
+                "agent-polling",
+                "workspace-jail",
+                "workspace-write",
+                "shell-unsandboxed",
+                "pwa-host",
+            ],
+        }
+
     @app.post("/api/chat")
     def chat(req: ChatRequest):
         engine_or_503()
