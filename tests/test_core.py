@@ -1450,17 +1450,63 @@ class ApprovalTests(ClientCase):
         self.assertFalse(refused["ok"])
         self.assertIn("rejected by the user", json.dumps(refused["result"]))
 
-    def test_nobody_answering_is_a_rejection_and_not_a_hang(self):
+    def test_nobody_answering_times_out_the_turn_after_one_attempt(self):
         with mock.patch.object(loop, "APPROVAL_TIMEOUT", 0.3):
             sid = self.start([_call("write_file", {"path": "note.md", "content": "hi"}),
+                              _call("write_file", {"path": "note.md", "content": "hi"}),
+                              _call("write_file", {"path": "note.md", "content": "hi"}),
+                              _call("write_file", {"path": "note.md", "content": "hi"}),
                               {"role": "assistant", "content": "done"}],
                              require_approval=True)
-            ask = self.ask(sid)
+            self.ask(sid)
             state = self.settle(sid)
         self.assertFalse((self.root / "note.md").exists())
         self.assertEqual(state["pending"], [])
-        refused = next(step for step in state["steps"] if step["type"] == "tool")
-        self.assertFalse(refused["ok"])
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(state["stop"], "approval_timeout")
+        self.assertEqual(len(self.engine.calls), 1, "a timeout must not ask the model to retry")
+        self.assertEqual(len([s for s in state["steps"] if s["type"] == "approval_required"]), 1)
+        self.assertEqual(len([s for s in state["steps"] if s["type"] == "tool_start"]), 1)
+        refused = [s for s in state["steps"] if s["type"] == "tool"]
+        self.assertEqual(len(refused), 1)
+        self.assertFalse(refused[0]["ok"])
+        self.assertEqual(refused[0]["result"]["permission"], "approval_timeout")
+        final = state["steps"][-1]
+        self.assertEqual(final["type"], "final")
+        self.assertEqual(final["stop_reason"], "approval_timeout")
+        self.assertIn("Approval timed out", final["content"])
+        self.assertNotIn("queue", [s["type"] for s in state["steps"]])
+
+    def test_an_identical_rejected_call_stops_without_a_second_wait(self):
+        sid = self.start([_call("write_file", {"path": "note.md", "content": "hi"}),
+                          _call("write_file", {"content": "hi", "path": "note.md"},
+                                call_id="call-2"),
+                          _call("write_file", {"path": "note.md", "content": "hi"},
+                                call_id="call-3"),
+                          {"role": "assistant", "content": "done"}],
+                         require_approval=True)
+        ask = self.ask(sid)
+        self.assertEqual(self.answer(sid, ask["approval_id"], "reject_once").status_code, 200)
+        state = self.settle(sid)
+        self.assertFalse((self.root / "note.md").exists())
+        self.assertEqual(state["pending"], [])
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(state["stop"], "permission_denied")
+        self.assertEqual(len(self.engine.calls), 2)
+        self.assertEqual(len([s for s in state["steps"] if s["type"] == "approval_required"]), 1,
+                         "the duplicate must be denied before another approval wait")
+        self.assertEqual(len([s for s in state["steps"] if s["type"] == "tool_start"]), 2)
+        refused = [s for s in state["steps"] if s["type"] == "tool"]
+        self.assertEqual(len(refused), 2)
+        self.assertFalse(any(s["ok"] for s in refused))
+        self.assertEqual(refused[0]["result"]["permission"], "reject_once")
+        self.assertEqual(refused[1]["result"]["permission"], "permission_denied")
+        self.assertIn("permission denied", refused[1]["result"]["error"])
+        final = state["steps"][-1]
+        self.assertEqual(final["type"], "final")
+        self.assertEqual(final["stop_reason"], "permission_denied")
+        self.assertIn("Permission denied", final["content"])
+        self.assertNotIn("queue", [s["type"] for s in state["steps"]])
 
     def test_cancelling_while_a_question_is_open_does_not_wait_out_the_timeout(self):
         started = time.monotonic()
@@ -1470,11 +1516,19 @@ class ApprovalTests(ClientCase):
                              require_approval=True)
             self.ask(sid)
             self.client.post("/api/agent/cancel", headers=HEADERS, json={"id": sid})
-            state = self.settle(sid)
+            state = self.poll_until(sid, lambda s: not s["pending"]
+                                    and any(step["type"] == "tool" for step in s["steps"]))
         self.assertEqual(state["status"], "cancelled")
         self.assertLess(time.monotonic() - started, 10,
                         "a cancel should stop the wait, not extend it")
         self.assertFalse((self.root / "note.md").exists())
+        self.assertEqual(len(self.engine.calls), 1)
+        self.assertEqual(state["pending"], [])
+        refused = [step for step in state["steps"] if step["type"] == "tool"]
+        self.assertEqual(len(refused), 1)
+        self.assertFalse(refused[0]["ok"])
+        self.assertEqual(refused[0]["result"]["permission"], "cancelled")
+        self.assertNotIn("final", [step["type"] for step in state["steps"]])
 
     def test_a_client_that_never_asks_for_approvals_is_still_denied_without_waiting(self):
         started = time.monotonic()

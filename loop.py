@@ -330,7 +330,7 @@ def new_session(task: str, workspace: str, *, allow_write: bool = False,
                 reasoning_effort: str = "auto") -> str:
     """Open a session. ``require_approval`` makes every gated call the user's
     decision: an ACP turn asks through the approver it passed, a polling turn
-    asks through `/api/agent/approve`, and nobody answering is a rejection.
+    asks through `/api/agent/approve`, and an unanswered request ends the turn.
     ``reasoning_effort`` is one of `EFFORT_LEVELS` and decides how much of the
     answer is spent thinking."""
     sid = uuid.uuid4().hex[:12]
@@ -474,7 +474,7 @@ def _cancelled(sid):
         return session is None or session["cancel"].is_set()
 
 
-APPROVAL_TIMEOUT = 120.0
+APPROVAL_TIMEOUT = 900.0
 _APPROVAL_OPTIONS = {"allow_once", "allow_always", "reject_once", "reject_always"}
 
 
@@ -482,16 +482,16 @@ def request_approval(sid, name, args):
     """Ask the client watching this session to allow or reject one tool call.
 
     The step it publishes carries the risk and the reason from `tools.GATES`,
-    so no client has to keep its own idea of what a tool can do. Nobody
-    answering — a disconnected client, a timeout, a cancel — is a rejection,
-    which is what the same call already got silently; the difference is that
-    now the user sees the question and the answer.
+    so no client has to keep its own idea of what a tool can do. Only an
+    explicit answer is a user rejection: timeout, cancellation and a vanished
+    session return distinct outcomes so the loop can close the card and stop
+    without asking the model to retry.
     """
     aid = uuid.uuid4().hex[:8]
     with _LOCK:
         session = SESSIONS.get(sid)
         if session is None:
-            return "reject_once"
+            return "missing_session"
         session.setdefault("approvals", {})[aid] = {"waiter": threading.Event(),
                                                     "decision": None}
     _emit(sid, {"type": "approval_required", "approval_id": aid, "name": name,
@@ -516,7 +516,11 @@ def request_approval(sid, name, args):
         decision = (record or {}).get("decision")
         if session is not None and record is not None:
             session.get("approvals", {}).pop(aid, None)
-    return decision if decision in _APPROVAL_OPTIONS else "reject_once"
+        if session is None or record is None:
+            return "missing_session"
+        if session["cancel"].is_set():
+            return "cancelled"
+    return decision if decision in _APPROVAL_OPTIONS else "approval_timeout"
 
 
 def resolve_approval(sid, approval_id, decision):
@@ -540,15 +544,16 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
     ``sink(event)`` receives live ``text`` / ``reasoning`` / ``plan`` events and
     needs ``stream=True`` for token deltas. Streaming also publishes the thought
     to ``session["steps"]``, coalesced by :class:`_Thoughts`, so a client that can
-    only poll watches the model reason instead of waiting for the turn to finish. ``approve(name, args)`` returns an
-    ACP permission option (allow_once, allow_always, reject_once,
-    reject_always) and, when present, gated tools are advertised and confirmed
-    at call time instead of hidden by session flags. A session opened with
-    ``require_approval`` and no explicit approver gets one built from
-    :func:`request_approval`, so a polling client answers over HTTP.
-    ``history`` is the prior
-    transcript of an ACP session; the finished transcript is stored back on the
-    session under ``history`` so the next turn continues this one.
+    only poll watches the model reason instead of waiting for the turn to finish.
+    ``approve(name, args)`` returns an ACP permission option (allow_once,
+    allow_always, reject_once, reject_always) or a terminal approval outcome
+    (approval_timeout, cancelled, missing_session). When present, gated tools are
+    advertised and confirmed at call time instead of hidden by session flags. A
+    session opened with ``require_approval`` and no explicit approver gets one
+    built from :func:`request_approval`, so a polling client answers over HTTP.
+    ``history`` is the prior transcript of an ACP session; the finished transcript
+    is stored back on the session under ``history`` so the next turn continues
+    this one.
     """
     with _LOCK:
         session = SESSIONS.get(sid)
@@ -592,6 +597,7 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
     budget = limits()
     seen: dict[str, str] = {}
     always = set()
+    rejected: set[tuple[str, str]] = set()
     used_phases = set()
     nudged = False
     # The files this prompt promised, and the ones this run has really put on
@@ -742,12 +748,19 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
                     if sink is not None:
                         sink(step)
 
-                ctx.progress = report
-                try:
-                    result = execute(call["name"], call["args"], ctx, confirm=confirm,
-                                     allowed_always=always)
-                finally:
-                    ctx.progress = None
+                signature = _call_signature(call)
+                if signature in rejected:
+                    result = {"ok": False,
+                              "error": (f"permission denied: identical {call['name']} call "
+                                        "was already rejected"),
+                              "permission": "permission_denied"}
+                else:
+                    ctx.progress = report
+                    try:
+                        result = execute(call["name"], call["args"], ctx, confirm=confirm,
+                                         allowed_always=always)
+                    finally:
+                        ctx.progress = None
                 _emit(sid, {"type": "tool", "name": call["name"], "args": call["args"],
                             "result": result, "ok": result.get("ok", False),
                             "call_id": call_id})
@@ -769,6 +782,34 @@ def run_agent(sid: str, max_steps: int = 14, *, sink=None, approve=None, stream=
                     notes.append(note)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", call["name"]),
                                  "content": rendered})
+                permission = result.get("permission")
+                if permission in ("reject_once", "reject_always"):
+                    rejected.add(signature)
+                if permission == "cancelled":
+                    _finish(sid, "cancelled")
+                    return
+                if permission in ("approval_timeout", "missing_session"):
+                    if permission == "approval_timeout":
+                        final = (f"Approval timed out after {APPROVAL_TIMEOUT:g} seconds for "
+                                 f"{call['name']}; the tool was not run.")
+                    else:
+                        final = (f"The approval session is no longer available for "
+                                 f"{call['name']}; the tool was not run.")
+                    _emit(sid, {"type": "final", "content": final,
+                                "stop_reason": permission})
+                    _finish(sid, "done", permission)
+                    return
+                if permission in ("permission_denied", "reject_always"):
+                    if permission == "permission_denied":
+                        final = (f"Permission denied: the identical {call['name']} call was "
+                                 "repeated after rejection; the turn was stopped.")
+                    else:
+                        final = (f"Permission denied: {call['name']} was rejected for the "
+                                 "session; the turn was stopped.")
+                    _emit(sid, {"type": "final", "content": final,
+                                "stop_reason": "permission_denied"})
+                    _finish(sid, "done", "permission_denied")
+                    return
             # The model answered the push-back by making a call, so the ask is
             # spent and a later regression in this same run gets one more. The
             # budget is per stretch of prose, not per run: a long task can slip
@@ -1203,6 +1244,12 @@ def _args(tc):
         return json.loads(raw or "{}")
     except json.JSONDecodeError:
         return {}
+
+
+def _call_signature(call):
+    """Name plus canonical arguments, independent of JSON object key order."""
+    return call["name"], json.dumps(call["args"], sort_keys=True,
+                                    separators=(",", ":"), ensure_ascii=False)
 
 
 def start_thread(sid, max_steps=14, *, stream=True):

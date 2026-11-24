@@ -477,6 +477,15 @@ def execute(name, args, ctx, *, confirm=None, allowed_always=None):
         if confirm is None:
             return {"ok": False, "error": f"permission denied for {name}"}
         decision = confirm(name, args if isinstance(args, dict) else {})
+        if decision == "approval_timeout":
+            return {"ok": False, "error": f"approval timed out for {name}",
+                    "permission": "approval_timeout"}
+        if decision == "cancelled":
+            return {"ok": False, "error": f"approval cancelled for {name}",
+                    "permission": "cancelled"}
+        if decision == "missing_session":
+            return {"ok": False, "error": f"approval session missing for {name}",
+                    "permission": "missing_session"}
         if decision not in {"allow_once", "allow_always"}:
             return {"ok": False, "error": f"{name} was rejected by the user",
                     "permission": decision or "rejected"}

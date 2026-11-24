@@ -29,6 +29,14 @@ def make_model(directory: Path, name="qwen36-35b", weights=True) -> Path:
     return model
 
 
+def make_recommended_model(directory: Path) -> Path:
+    model = directory / wizard.RECOMMENDED_MODEL_DIR
+    model.mkdir(parents=True)
+    for name in wizard.RECOMMENDED_MODEL_FILES:
+        (model / name).write_bytes(b"x" * 2048)
+    return model
+
+
 class BuildConfigTests(unittest.TestCase):
     def test_writes_the_same_twelve_keys_as_the_desktop_wizard(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -232,9 +240,8 @@ class ModelDownloadTests(unittest.TestCase):
                 calls.append(kwargs)
                 target = Path(kwargs["local_dir"])
                 target.mkdir(parents=True)
-                (target / "config.json").write_text("{}", encoding="utf-8")
-                (target / "model-00001-of-00002.safetensors").write_bytes(b"weights")
-                (target / "tokenizer.json").write_text("{}", encoding="utf-8")
+                for name in wizard.RECOMMENDED_MODEL_FILES:
+                    (target / name).write_bytes(b"weights")
                 return str(target)
 
             environ = {"HF_TOKEN": "hf-test-token"}
@@ -244,7 +251,7 @@ class ModelDownloadTests(unittest.TestCase):
             self.assertEqual(path, root / "qwen36-35b")
             self.assertEqual(len(calls), 1)
             call = calls[0]
-            self.assertEqual(call["repo_id"], "Qwen/Qwen3.6-35B-A3B")
+            self.assertEqual(call["repo_id"], "Liso/qwen36-35b-colibri")
             self.assertEqual(Path(call["local_dir"]), path)
             self.assertEqual(call["token"], "hf-test-token")
             self.assertEqual(call["max_workers"], 8)
@@ -278,10 +285,26 @@ class ModelDownloadTests(unittest.TestCase):
                 self.assertEqual((root / "qwen36-35b" / "keep.user").read_text(encoding="utf-8"),
                                  "mine")
 
+    def test_one_missing_or_zero_byte_required_shard_is_incomplete(self):
+        for state in ("missing", "empty"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                model = make_recommended_model(root)
+                shard = model / "model-00039.safetensors"
+                if state == "missing":
+                    shard.unlink()
+                else:
+                    shard.write_bytes(b"")
+                with self.assertRaises(wizard.ModelDownloadError) as raised:
+                    wizard.download_recommended_model(
+                        root, environ={}, snapshot_download=lambda **_: None,
+                        out=lambda message: None)
+                self.assertIn("model-00039.safetensors", str(raised.exception))
+
     def test_complete_model_is_idempotent_and_never_calls_the_downloader(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            model = make_model(root)
+            model = make_recommended_model(root)
             (model / "keep.user").write_text("mine", encoding="utf-8")
             download = mock.Mock(side_effect=AssertionError("network must not be used"))
             path = wizard.download_recommended_model(

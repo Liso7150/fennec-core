@@ -19,6 +19,7 @@ import urllib.request
 import json
 
 GITHUB_REPO = "Liso7150/fennec-core"
+CHECKSUMS_ASSET = "SHA256SUMS"
 
 
 @dataclass
@@ -90,6 +91,38 @@ def is_newer(candidate, current):
     return left > right
 
 
+def _normalize_checksum(checksum: str) -> str:
+    if len(checksum) != 64 or any(char not in "0123456789abcdefABCDEF" for char in checksum):
+        raise ValueError("Checksum must be exactly 64 hexadecimal characters")
+    return checksum.lower()
+
+
+def checksum_for(checksums: str, asset_name: str) -> str:
+    """Return the validated lowercase digest for one exact asset basename."""
+    found = None
+    for number, line in enumerate(checksums.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) != 2:
+            raise ValueError(f"Malformed {CHECKSUMS_ASSET} line {number}: expected two fields")
+        digest, filename = fields
+        if filename.startswith("*"):
+            filename = filename[1:]
+        try:
+            digest = _normalize_checksum(digest)
+        except ValueError as error:
+            raise ValueError(f"Malformed {CHECKSUMS_ASSET} line {number}: {error}") from error
+        if filename == asset_name:
+            if found is not None:
+                raise ValueError(f"Duplicate {CHECKSUMS_ASSET} entry for {asset_name}")
+            found = digest
+    if found is None:
+        raise ValueError(f"{CHECKSUMS_ASSET} has no entry for {asset_name}")
+    return found
+
+
 def check_stable(current_version: str) -> Optional[Release]:
     """Check GitHub releases for newer version"""
     url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -119,12 +152,11 @@ def check_stable(current_version: str) -> Optional[Release]:
         for a in data.get("assets", [])
     ]
     
-    # Look for checksums file
-    checksums_url = None
-    for a in data.get("assets", []):
-        if "checksums" in a["name"].lower() or a["name"].endswith(".sha256"):
-            checksums_url = a["browser_download_url"]
-            break
+    # Stable binaries require the publisher's exact digest-list asset.
+    checksums_url = next(
+        (asset.download_url for asset in assets if asset.name == CHECKSUMS_ASSET),
+        None,
+    )
     
     return Release(
         version=version,
@@ -159,7 +191,11 @@ def check_experimental() -> Optional[Release]:
 
 
 def download_asset(url: str, expected_checksum: Optional[str] = None) -> bytes:
-    """Download an asset with optional checksum verification"""
+    """Download bytes; binary callers must supply a valid SHA-256 digest.
+
+    A missing digest is allowed only for metadata such as SHA256SUMS itself.
+    """
+    expected = _normalize_checksum(expected_checksum) if expected_checksum is not None else None
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "fennec-updater"})
         with urllib.request.urlopen(req, timeout=300) as resp:
@@ -167,10 +203,10 @@ def download_asset(url: str, expected_checksum: Optional[str] = None) -> bytes:
     except Exception as e:
         raise Exception(f"Download: {e}")
     
-    if expected_checksum:
+    if expected is not None:
         actual = hashlib.sha256(data).hexdigest()
-        if actual != expected_checksum:
-            raise Exception(f"Checksum mismatch: expected {expected_checksum}, got {actual}")
+        if actual != expected:
+            raise Exception(f"Checksum mismatch: expected {expected}, got {actual}")
     
     return data
 
@@ -219,19 +255,15 @@ def update(experimental: bool = False) -> str:
         
         print(f"[update] Downloading {name}...")
         
-        # Download checksum if available
-        checksum = None
-        if release.checksums_url:
-            try:
-                checksum_data = download_asset(release.checksums_url).decode()
-                for line in checksum_data.splitlines():
-                    parts = line.split()
-                    if len(parts) == 2 and parts[1] == name:
-                        checksum = parts[0]
-                        break
-            except Exception:
-                pass
-        
+        # A stable binary is never downloaded without its exact manifest entry.
+        if not release.checksums_url:
+            raise RuntimeError(f"Release is missing {CHECKSUMS_ASSET}")
+        try:
+            checksum_data = download_asset(release.checksums_url).decode("utf-8")
+        except Exception as error:
+            raise RuntimeError(f"Download {CHECKSUMS_ASSET}: {error}") from error
+        checksum = checksum_for(checksum_data, name)
+
         data = download_asset(asset.download_url, checksum)
         staged = stage_asset(data, name)
         

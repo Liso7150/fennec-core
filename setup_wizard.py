@@ -63,12 +63,20 @@ VULKAN_LINUX = (
     "/usr/lib/libvulkan.so.1",
 )
 UPSTREAM = "fine-tuning lyogavin/airllm (https://github.com/lyogavin/airllm)"
-RECOMMENDED_MODEL_REPO = "Qwen/Qwen3.6-35B-A3B"
+# The repository keeps its historical name; its switch_mlp int4 container is the
+# Fennec-ready checkpoint served in production, not the 67 GiB BF16 upstream source.
+RECOMMENDED_MODEL_REPO = "Liso/qwen36-35b-colibri"
 RECOMMENDED_MODEL_DIR = "qwen36-35b"
+RECOMMENDED_MODEL_GIB = 22.78
 MAX_MODEL_DOWNLOAD_WORKERS = 8
-# JSON covers model/config/tokenizer metadata; the explicit tokenizer.model pattern
-# permits SentencePiece without opening the door to arbitrary *.model or *.bin files.
 MODEL_DOWNLOAD_PATTERNS = ("*.json", "*.safetensors", "*.txt", "tokenizer.model")
+RECOMMENDED_MODEL_FILES = (
+    "config.json", "config.hf.json", "generation_config.json",
+    "preprocessor_config.json", "qwen36_meta.json", "tokenizer.json",
+    "tokenizer_config.json", "model-globals.safetensors", "model-mtp.safetensors",
+    "model-vision.safetensors",
+    *(f"model-{index:05d}.safetensors" for index in range(40)),
+)
 
 
 class ModelDownloadError(RuntimeError):
@@ -257,14 +265,12 @@ def install_dependencies(python: str, *, venv: bool = False, packages=CORE_DEPS,
 
 def _incomplete_model_detail(directory: Path) -> str:
     missing = []
-    if not (directory / "config.json").is_file():
-        missing.append("config.json")
-    try:
-        has_weights = any(path.is_file() for path in directory.glob("*.safetensors"))
-    except OSError:
-        has_weights = False
-    if not has_weights:
-        missing.append("at least one .safetensors file")
+    for name in RECOMMENDED_MODEL_FILES:
+        try:
+            if not (directory / name).is_file() or (directory / name).stat().st_size == 0:
+                missing.append(name)
+        except OSError:
+            missing.append(name)
     return "incomplete model download: missing " + ", ".join(missing) if missing else ""
 
 
@@ -295,7 +301,7 @@ def download_recommended_model(models_root, *, environ=None, snapshot_download=N
     # this process's environment, and the token is never persisted by the wizard.
     token = str(env.get("HF_TOKEN") or "").strip() or False
     out(f"Downloading {RECOMMENDED_MODEL_REPO} to {destination} "
-        f"(up to {MAX_MODEL_DOWNLOAD_WORKERS} workers)")
+        f"(up to {RECOMMENDED_MODEL_GIB:.2f} GiB, {MAX_MODEL_DOWNLOAD_WORKERS} workers)")
     try:
         download(
             repo_id=RECOMMENDED_MODEL_REPO,
