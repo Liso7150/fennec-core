@@ -209,6 +209,88 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual(wizard.model_readiness("", []), "none selected")
 
 
+class ModelDownloadTests(unittest.TestCase):
+    def test_missing_dependency_gives_an_actionable_install_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.dict(sys.modules, {"huggingface_hub": None}):
+                with self.assertRaises(wizard.ModelDownloadError) as raised:
+                    wizard.download_recommended_model(root, environ={}, python=sys.executable)
+            message = str(raised.exception)
+            self.assertIn("huggingface_hub>=0.25", message)
+            self.assertIn("pip install", message)
+            self.assertIn("fennec-core[models]", message)
+            self.assertIn("--download-model", message)
+            self.assertFalse((root / "qwen36-35b").exists())
+
+    def test_success_download_uses_the_verified_repo_safe_files_and_bounded_workers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = []
+
+            def fake_download(**kwargs):
+                calls.append(kwargs)
+                target = Path(kwargs["local_dir"])
+                target.mkdir(parents=True)
+                (target / "config.json").write_text("{}", encoding="utf-8")
+                (target / "model-00001-of-00002.safetensors").write_bytes(b"weights")
+                (target / "tokenizer.json").write_text("{}", encoding="utf-8")
+                return str(target)
+
+            environ = {"HF_TOKEN": "hf-test-token"}
+            path = wizard.download_recommended_model(
+                root, environ=environ, snapshot_download=fake_download, out=lambda message: None)
+
+            self.assertEqual(path, root / "qwen36-35b")
+            self.assertEqual(len(calls), 1)
+            call = calls[0]
+            self.assertEqual(call["repo_id"], "Qwen/Qwen3.6-35B-A3B")
+            self.assertEqual(Path(call["local_dir"]), path)
+            self.assertEqual(call["token"], "hf-test-token")
+            self.assertEqual(call["max_workers"], 8)
+            self.assertLessEqual(call["max_workers"], 8)
+            for pattern in ("*.json", "*.safetensors", "*.txt", "tokenizer.model"):
+                self.assertIn(pattern, call["allow_patterns"])
+            self.assertFalse(any(".gguf" in pattern or ".bin" in pattern
+                                 for pattern in call["allow_patterns"]))
+            self.assertEqual(environ, {"HF_TOKEN": "hf-test-token"})
+
+    def test_incomplete_download_is_rejected_without_deleting_existing_files(self):
+        for present in ("config.json", "model.safetensors"):
+            with self.subTest(present=present), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                calls = []
+
+                def fake_download(**kwargs):
+                    calls.append(kwargs)
+                    target = Path(kwargs["local_dir"])
+                    target.mkdir(parents=True)
+                    (target / present).write_bytes(b"partial")
+                    (target / "keep.user").write_text("mine", encoding="utf-8")
+                    return str(target)
+
+                with self.assertRaises(wizard.ModelDownloadError) as raised:
+                    wizard.download_recommended_model(
+                        root, environ={}, snapshot_download=fake_download, out=lambda message: None)
+                missing = ".safetensors" if present == "config.json" else "config.json"
+                self.assertIn(missing, str(raised.exception))
+                self.assertIs(calls[0]["token"], False)
+                self.assertEqual((root / "qwen36-35b" / "keep.user").read_text(encoding="utf-8"),
+                                 "mine")
+
+    def test_complete_model_is_idempotent_and_never_calls_the_downloader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = make_model(root)
+            (model / "keep.user").write_text("mine", encoding="utf-8")
+            download = mock.Mock(side_effect=AssertionError("network must not be used"))
+            path = wizard.download_recommended_model(
+                root, environ={}, snapshot_download=download, out=lambda message: None)
+            self.assertEqual(path, model)
+            download.assert_not_called()
+            self.assertEqual((model / "keep.user").read_text(encoding="utf-8"), "mine")
+
+
 class MainTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -221,14 +303,15 @@ class MainTests(unittest.TestCase):
         self.model = make_model(self.models)
         self.config_file = self.home / ".fennec" / "config.json"
 
-    def run_main(self, *arguments, input_fn=None):
+    def run_main(self, *arguments, input_fn=None, environ=None):
         out, err = io.StringIO(), io.StringIO()
         dependencies = {"missing": [], "installed": list(wizard.CORE_DEPS)}
         with mock.patch.object(wizard, "probe_dependencies", return_value=dependencies):
             code = wizard.main(
                 ["--root", str(self.root / "Fennec"), "--engine-root", str(self.engine),
                  "--models-root", str(self.models), "--python", sys.executable, *arguments],
-                home=self.home, environ={}, input_fn=input_fn, out=out.write, err=err.write)
+                home=self.home, environ={} if environ is None else environ,
+                input_fn=input_fn, out=out.write, err=err.write)
         return code, out.getvalue(), err.getvalue()
 
     def test_yes_writes_the_shared_config_and_picks_the_single_model(self):
@@ -262,6 +345,45 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         printed = json.loads(out)
         self.assertEqual(printed["engine_root"], str(self.engine))
+        self.assertFalse(self.config_file.exists())
+
+    def test_setup_never_downloads_without_the_explicit_flag(self):
+        with mock.patch.object(wizard, "download_recommended_model",
+                               side_effect=AssertionError("unexpected download")) as download:
+            code, out, err = self.run_main("--yes")
+        self.assertEqual(code, 0, err)
+        download.assert_not_called()
+
+    def test_download_model_selects_the_recommended_path_without_persisting_the_token(self):
+        make_model(self.models, "other")
+        token = "hf-test-secret"
+        with mock.patch.object(wizard, "download_recommended_model",
+                               return_value=self.model) as download:
+            code, out, err = self.run_main(
+                "--yes", "--json", "--download-model", environ={"HF_TOKEN": token})
+        self.assertEqual(code, 0, err)
+        download.assert_called_once_with(
+            str(self.models), environ={"HF_TOKEN": token}, python=sys.executable, out=mock.ANY)
+        config_text = self.config_file.read_text(encoding="utf-8")
+        config = json.loads(config_text)
+        self.assertEqual(config["model"], str(self.model))
+        self.assertNotIn(token, config_text + out + err)
+
+    def test_incomplete_download_fails_before_writing_the_config(self):
+        with mock.patch.object(
+                wizard, "download_recommended_model",
+                side_effect=wizard.ModelDownloadError("incomplete model download")):
+            code, out, err = self.run_main("--yes", "--download-model")
+        self.assertEqual(code, 1)
+        self.assertIn("incomplete model download", err)
+        self.assertFalse(self.config_file.exists())
+
+    def test_dry_run_never_performs_a_requested_download(self):
+        with mock.patch.object(wizard, "download_recommended_model") as download:
+            code, out, err = self.run_main("--dry-run", "--json", "--download-model")
+        self.assertEqual(code, 0, err)
+        download.assert_not_called()
+        self.assertIn("not performed during --dry-run", err)
         self.assertFalse(self.config_file.exists())
 
     def test_interactive_blanks_accept_defaults_and_write(self):

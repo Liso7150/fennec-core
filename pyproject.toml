@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["httpx>=0.27"]
+models = ["huggingface_hub>=0.25"]
 stt = ["faster-whisper==1.2.1", "av>=14,<18"]  # PyAV 18+ removed metadata_errors that faster-whisper passes
 # Only materialising converted tensors needs numpy; classifying a folder and planning the
 # conversion stay stdlib, so a machine that never converts pays nothing for it.

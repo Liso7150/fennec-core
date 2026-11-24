@@ -8,7 +8,8 @@ wizard; this module is its terminal counterpart for servers and CI:
     fennec setup --yes           # accept detected defaults
     fennec setup --yes --json    # machine-readable result
 
-Nothing is downloaded, installed or started unless `--install-deps` is passed.
+Nothing is installed or started unless `--install-deps` is passed. The recommended
+model is downloaded only when `--download-model` is passed.
 """
 
 from __future__ import annotations
@@ -62,6 +63,16 @@ VULKAN_LINUX = (
     "/usr/lib/libvulkan.so.1",
 )
 UPSTREAM = "fine-tuning lyogavin/airllm (https://github.com/lyogavin/airllm)"
+RECOMMENDED_MODEL_REPO = "Qwen/Qwen3.6-35B-A3B"
+RECOMMENDED_MODEL_DIR = "qwen36-35b"
+MAX_MODEL_DOWNLOAD_WORKERS = 8
+# JSON covers model/config/tokenizer metadata; the explicit tokenizer.model pattern
+# permits SentencePiece without opening the door to arbitrary *.model or *.bin files.
+MODEL_DOWNLOAD_PATTERNS = ("*.json", "*.safetensors", "*.txt", "tokenizer.model")
+
+
+class ModelDownloadError(RuntimeError):
+    """A requested model download did not produce a complete local model."""
 
 
 def config_path(environ=None, home=None) -> Path:
@@ -242,6 +253,75 @@ def install_dependencies(python: str, *, venv: bool = False, packages=CORE_DEPS,
     if output.strip():
         out(output.strip()[-4000:])
     return result.returncode == 0
+
+
+def _incomplete_model_detail(directory: Path) -> str:
+    missing = []
+    if not (directory / "config.json").is_file():
+        missing.append("config.json")
+    try:
+        has_weights = any(path.is_file() for path in directory.glob("*.safetensors"))
+    except OSError:
+        has_weights = False
+    if not has_weights:
+        missing.append("at least one .safetensors file")
+    return "incomplete model download: missing " + ", ".join(missing) if missing else ""
+
+
+def download_recommended_model(models_root, *, environ=None, snapshot_download=None,
+                               python=None, out=print) -> Path:
+    """Download the recommended safetensors model without removing existing files."""
+    env = os.environ if environ is None else environ
+    destination = Path(models_root).expanduser() / RECOMMENDED_MODEL_DIR
+    if destination.exists() and not destination.is_dir():
+        raise ModelDownloadError(f"Model destination is not a folder: {destination}")
+    incomplete = _incomplete_model_detail(destination)
+    if not incomplete:
+        out(f"Model already complete: {destination}")
+        return destination
+
+    download = snapshot_download
+    if download is None:
+        try:
+            from huggingface_hub import snapshot_download as download
+        except (ImportError, OSError):
+            command = f'"{python or sys.executable}" -m pip install "fennec-core[models]"'
+            raise ModelDownloadError(
+                "Downloading the recommended model requires huggingface_hub>=0.25. "
+                f"Install it with `{command}`, then rerun `fennec setup --download-model`."
+            ) from None
+
+    # False disables Hugging Face's saved-token fallback: setup auth comes only from
+    # this process's environment, and the token is never persisted by the wizard.
+    token = str(env.get("HF_TOKEN") or "").strip() or False
+    out(f"Downloading {RECOMMENDED_MODEL_REPO} to {destination} "
+        f"(up to {MAX_MODEL_DOWNLOAD_WORKERS} workers)")
+    try:
+        download(
+            repo_id=RECOMMENDED_MODEL_REPO,
+            local_dir=str(destination),
+            token=token,
+            allow_patterns=list(MODEL_DOWNLOAD_PATTERNS),
+            max_workers=MAX_MODEL_DOWNLOAD_WORKERS,
+        )
+    except Exception as exc:
+        detail = str(exc).strip() or type(exc).__name__
+        if token:
+            detail = detail.replace(token, "[redacted]")
+        raise ModelDownloadError(
+            f"Could not download {RECOMMENDED_MODEL_REPO} to {destination}: {detail[:1000]}. "
+            "Check the network connection and HF_TOKEN environment variable, then rerun "
+            "`fennec setup --download-model`; existing files were kept."
+        ) from None
+
+    incomplete = _incomplete_model_detail(destination)
+    if incomplete:
+        raise ModelDownloadError(
+            f"{incomplete} at {destination}. Rerun `fennec setup --download-model` to resume; "
+            "existing files were kept."
+        )
+    out(f"Model ready: {destination}")
+    return destination
 
 
 def fennec_binary(directory):
@@ -632,6 +712,9 @@ def main(argv=None, *, config=None, home=None, environ=None, input_fn=None,
     parser.add_argument("--cache-root", help="cache directory")
     parser.add_argument("--python", help="absolute Python 3.10+ interpreter")
     parser.add_argument("--model", help="model directory or a name under --models-root")
+    parser.add_argument("--download-model", action="store_true",
+                        help=f"download {RECOMMENDED_MODEL_REPO} into "
+                             f"<models-root>/{RECOMMENDED_MODEL_DIR} and select it")
     parser.add_argument("--backend", choices=BACKENDS, help="engine backend")
     parser.add_argument("--ctx", type=int, help="context length; 0 means automatic")
     parser.add_argument("--policy", choices=POLICIES, help="engine resource policy")
@@ -705,6 +788,8 @@ def main(argv=None, *, config=None, home=None, environ=None, input_fn=None,
                 return 1
 
     if args.dry_run:
+        if args.download_model:
+            warn("fennec setup: warning: --download-model was not performed during --dry-run")
         if args.json:
             out(json.dumps(config_values, indent=2))
         else:
@@ -721,6 +806,19 @@ def main(argv=None, *, config=None, home=None, environ=None, input_fn=None,
         if answer.startswith("n"):
             out("Nothing written.")
             return 1
+
+    if args.download_model:
+        try:
+            model_path = download_recommended_model(
+                config_values["models_root"], environ=env,
+                python=python.get("command") or sys.executable,
+                out=(lambda message: None) if args.json else out,
+            )
+        except ModelDownloadError as exc:
+            warn(f"fennec setup: {exc}")
+            return 1
+        config_values["model"] = str(model_path)
+        models = scan_models(config_values["models_root"], cache_root=config_values["cache_root"])
 
     try:
         result = write_config(destination, config_values)
