@@ -1,4 +1,4 @@
-![Fennec Core 1.0.0 — the Python orchestration service behind the Fennec suite: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and core-owned connectors. The supported coding-agent PWA front door is the separate Rust/Axum fennec-agent.](docs/hero.png)
+![Fennec Core 1.0.0 — the shared runtime behind every Fennec app: engine supervisor, bounded agent loop, workspace-jailed tools, ACP v1 for editors, and a FastAPI service hosting the browser workspace. Python 3.10+, Rust edition 2024, 535 Python tests, 6 Rust crates, 66 Rust tests, MIT license.](docs/hero.png)
 
 ---
 
@@ -6,9 +6,9 @@
 
 | Python tests | Rust tests | Rust crates | Python modules | Runtime deps | `fennec-rs` binary |
 |:---:|:---:|:---:|:---:|:---:|:---:|
-| 525 in 14 files | 54 in 5 crates | 5 | 16 | 4 | ≈ 1.9 MB |
+| 535 in 14 files | 66 in 6 crates | 6 | 16 | 4 | ≈ 1.9 MB |
 
-Counts measured on 2026-11-22 from `tests/` (525 collected, 1 skipped) and `src/` (5 crates). Binary size measured from
+Counts measured on 2026-11-24 from `tests/` (535 collected, 1 skipped) and `src/` (6 crates). Binary size measured from
 `fennec-cli/target/release/fennec-rs.exe` (Windows x64 `cargo build --release --offline`, 1,897,180 bytes at 1.0.0).
 
 One reference implementation for the desktop, coding-agent and JetBrains apps. Pure logic is
@@ -39,7 +39,6 @@ engine supervision, and optional connectors:
                  │
                  ▼
         Fennec native binary on 127.0.0.1:8184, spawned on demand
-        (legacy Colibri c/coli under Python as fallback)
 ```
 
 It stops the child it owns with all descendants, never a server it attached to. A built
@@ -92,33 +91,19 @@ The engine listens on `127.0.0.1:8184`, started only when a message needs it.
 > A non-loopback bind requires an app token (`FENNEC_APP_TOKEN`) **and** TLS in front of the
 > service. Host and Origin are checked on every request; plain LAN HTTP is refused.
 
-### Connect n8n Nod
+### Connect Nod (n8n-compatible)
 
-Fennec can expose a private, read-only MCP connector for Nod. It is disabled unless you set a
-separate token before starting the service:
+The native `fennec-nod` stdio binary lives in `fennec-coding-agent`. It exposes only Fennec status,
+jailed workspace listing, jailed file reading, jailed grep, and direct local-model chat. It does not
+expose shell, Python, file writes, browser automation, coworker delegation, or the bounded agent
+loop. Nod remains a separate application and connects through its normal MCP connector flow.
 
-```bash
-export FENNEC_MCP_TOKEN=use-a-long-random-value
-fennec-agent serve --host 127.0.0.1 --port 8787
-```
+### Obsidian boundary
 
-In Nod, open **Connect → MCP**, choose a private/local server, and enter the Fennec MCP address
-`http://127.0.0.1:8787/mcp` with the same bearer token. The connector exposes only Fennec status,
-jailed workspace listing, jailed file reading, jailed grep, and direct local-model chat. It does
-not expose shell, Python, file writes, browser automation, coworker delegation, or the bounded
-agent loop. Host and Origin checks still apply, and all tool responses are redacted through Fennec's
-secret filter.
-
-This integration is a Python HTTP protocol endpoint; it does not embed Nod and adds no Node.js or
-Electron dependency to Fennec. Nod remains a separate application that connects through its normal
-MCP connector flow.
-
-### Obsidian status
-
-Obsidian is not integrated yet. If a connector is added, it belongs in `fennec-core` as an explicit,
-opt-in boundary around a configured vault, starting with read-only access. Fennec will not embed
-Obsidian, Node.js, Electron, or a plugin runtime; vault writes and any API credentials require a
-separate approval and secret-storage design.
+Obsidian support lives in the Rust/Axum `fennec-agent` backend as an opt-in local-vault writer. The
+vault is selected with `FENNEC_OBSIDIAN_VAULT` or `OBSIDIAN_VAULT`; titles and folders are jailed,
+existing notes are protected unless overwrite is explicit, and Obsidian remains responsible for
+account login and Sync. Fennec does not embed Obsidian, Node.js, Electron, or a plugin runtime.
 
 ### Subcommands
 
@@ -163,7 +148,7 @@ read-only by default; the speech sidecar (faster-whisper, CPU) sits behind `POST
 
 ## Rust workspace
 
-`src/` holds five crates, all at version 1.0.0, edition 2024. They port pure logic —
+`src/` holds six crates, all at version 1.0.0, edition 2024. They port pure logic —
 no inference, no model weights. Each is the only implementation of its feature: the desktop
 app, the JetBrains sidecar and the CLI path-depend on these, they do not copy them.
 
@@ -174,6 +159,7 @@ app, the JetBrains sidecar and the CLI path-depend on these, they do not copy th
 | `fennec-outlets` | secret redaction and blocked-host checks |
 | `fennec-preflight` | the memory preflight plan |
 | `fennec-client` | the loopback protocol clients (agent server + engine SSE) and suite/manifest discovery |
+| `fennec-workspace-tools` | the workspace-jailed read/edit/grep/run tools and the jail path that must match the PWA byte for byte |
 
 Context compaction is not here: it has one Rust implementation, in
 [fennec-economy](https://github.com/Liso7150/fennec-economy), which `fennec-core`, the
@@ -206,8 +192,9 @@ or the newest result.
 Savings are reported per session in `/api/agent/poll` usage as `context_chars_before`,
 `context_chars_after`, `context_elided` and `context_deduped`.
 
-**Measured**, on a representative transcript against a local Colibri-served Qwen3.6-35B-A3B
-endpoint, 2 order-counterbalanced pairs, `max_tokens=8`, `temperature=0`:
+**Measured 2026-11-10**, on a representative transcript against a local Colibri-served
+Qwen3.6-35B-A3B endpoint (`qwen3.6-colibri` on `127.0.0.1:8197`), 2 order-counterbalanced
+pairs, `max_tokens=8`, `temperature=0`:
 
 | Arm | Payload chars | Prompt tokens | Median TTFT |
 |---|---|---|---|
@@ -218,7 +205,8 @@ endpoint, 2 order-counterbalanced pairs, `max_tokens=8`, `temperature=0`:
 Compaction itself reduced a 52,543-character transcript to 19,413 (3 results elided, 1
 deduplicated). Source: `fennec-finetune/results/context_payload.json`, produced by
 `fennec-finetune/scripts/bench_context_payload.py`. Two pairs is a small sample: the TTFT
-delta is a measurement on this host, not a general latency claim.
+delta is a measurement on this host, not a general latency claim, and it is **not a Fennec
+figure** — the endpoint that served it was Colibri.
 
 Engine benchmarks: see `benchmarks/` in the suite root.
 
@@ -241,16 +229,16 @@ fennec setup --yes --install-deps                  # pip install missing core de
 `balanced`, `experimental-fast`. Models are optional.
 
 > [!NOTE]
-> `--engine-root` accepts either a native Fennec checkout (a `fennec` binary under
-> `target/release`, `target/debug` or the root) or a Colibri checkout carrying
-> `c/coli` and `c/openai_server.py`. The engine runtime prefers the native binary;
-> `c/coli` is the legacy fallback.
+> `--engine-root` must be a Fennec checkout carrying a built binary (`fennec` under
+> `target/release`, `target/debug` or the root). Anything else — an unbuilt checkout,
+> a foreign tree, a missing path — fails validation with the same remedy: build the
+> engine with `cargo build --release` or point `engine_root` elsewhere.
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v     # 525 tests across 14 files, 1 skipped
-cd src && cargo test --release --offline    # 54 tests across 14 suites
+python -m unittest discover -s tests -v     # 535 tests across 14 files, 1 skipped
+cd src && cargo test --release --offline    # 66 tests across 16 suites
 ```
 
 Everything is hermetic: no engine, no network, no model. The tokenizer/economy bridge is
@@ -262,12 +250,16 @@ Python side produces, so the two implementations cannot silently drift.
 ## Credits
 
 Engine: [Liso7150/fennec](https://github.com/Liso7150/fennec). Base idea:
-[JustVugg/colibri](https://github.com/JustVugg/colibri) — device-tiered MoE inference, still
-supported as the legacy fallback. Fine-tuning: [AirLLM](https://github.com/lyogavin/airllm).
+[JustVugg/colibri](https://github.com/JustVugg/colibri) — device-tiered MoE inference,
+replaced by Fennec and never launched here. Fine-tuning: [AirLLM](https://github.com/lyogavin/airllm).
 Browser policy: a Liquid **d1** decision model, used only through `liquid.py` - the
 hosted `d1.2`
 (`https://api.liquid.ai/decisions/v1/systemone`, paid, `LIQUID_API_KEY`) or the
-free open-weight `d1-2B` served on loopback (`LIQUID_ENDPOINT`, no key, $0.00). The page reader `snapshot.py`,
+free open-weight `d1-2B` on loopback (`LIQUID_ENDPOINT`, no key, $0.00). The loopback
+half is not provisioned here: `d1-2B` speaks the same System One envelope, and Fennec's
+own engine serves `/v1/chat/completions`, not `/v1/systemone`, so that lane needs a
+System One-compatible model server (llama.cpp >= 0.8.0) already answering the URL you
+point `LIQUID_ENDPOINT` at. The page reader `snapshot.py`,
 which holds that JS as its `JS` constant, is derived from `snapshot.js` in [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast)
 (MIT License, Copyright (c) 2026 Browser Use) — attribution for derivative code, not a
 dependency: that checkout drives nothing here. The lane's CDP transport is
