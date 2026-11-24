@@ -9,8 +9,8 @@ Every download is verified against a SHA-256 checksum before applying.
 import hashlib
 import os
 import platform
-import shutil
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +67,29 @@ def asset_name(base: str) -> str:
         return f"{base}-{os_name}-{arch}"
 
 
+def is_newer(candidate, current):
+    """`True` only when candidate is a strictly newer dotted version.
+
+    A string compare ranks 1.9.0 above 1.10.0, and the published releases run
+    *behind* a working tree, so a 1.0.0 checkout must not pull 0.9.0 assets just
+    because the tag differs. Returns `None` when either side is not three plain
+    numbers, and the caller refuses to guess.
+    """
+    def parts(version):
+        fields = str(version).strip().lstrip("v").split(".")
+        if len(fields) != 3:
+            return None
+        try:
+            return tuple(int(field) for field in fields)
+        except ValueError:
+            return None
+
+    left, right = parts(candidate), parts(current)
+    if left is None or right is None:
+        return None
+    return left > right
+
+
 def check_stable(current_version: str) -> Optional[Release]:
     """Check GitHub releases for newer version"""
     url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -84,7 +107,7 @@ def check_stable(current_version: str) -> Optional[Release]:
     version = tag.lstrip("v")
     
     # Simple version comparison
-    if version <= current_version:
+    if is_newer(version, current_version) is not True:
         return None
     
     assets = [
@@ -152,25 +175,16 @@ def download_asset(url: str, expected_checksum: Optional[str] = None) -> bytes:
     return data
 
 
-def replace_binary(new_data: bytes) -> None:
-    """Replace the current binary with new data"""
-    current_exe = Path(sys.executable)
-    
-    if platform.system().lower() == "windows":
-        # On Windows, we can't replace a running exe directly
-        # Write to a temp file and let the user replace it
-        temp_path = current_exe.with_suffix(".exe.new")
-        temp_path.write_bytes(new_data)
-        print(f"[update] New binary written to {temp_path}")
-        print(f"[update] To apply: stop fennec, rename {temp_path} to {current_exe}, restart")
-    else:
-        # On Unix, we can replace directly
-        backup = current_exe.with_suffix(current_exe.suffix + ".old")
-        if backup.exists():
-            backup.unlink()
-        shutil.copy2(current_exe, backup)
-        current_exe.write_bytes(new_data)
-        current_exe.chmod(0o755)
+def stage_asset(new_data: bytes, name: str) -> Path:
+    """Park a verified download in the temp dir, overwriting nothing live.
+
+    `sys.executable` is the interpreter running core, not a Fennec binary, so
+    replacing it in place put release bytes over Python itself. What moves this
+    repo is `fennec update`, which fast-forwards the git checkout.
+    """
+    staged = Path(tempfile.gettempdir()) / name
+    staged.write_bytes(new_data)
+    return staged
 
 
 def update(experimental: bool = False) -> str:
@@ -219,13 +233,20 @@ def update(experimental: bool = False) -> str:
                 pass
         
         data = download_asset(asset.download_url, checksum)
-        replace_binary(data)
+        staged = stage_asset(data, name)
         
-        return f"Updated to {release.version} - restart required"
+        return (
+            f"Downloaded v{release.version} to {staged}. This repo updates from git: "
+            f"run `fennec update` to fast-forward the checkout."
+        )
 
 
 if __name__ == "__main__":
     import sys
+    if {"-h", "--help"} & set(sys.argv[1:]):
+        print("usage: python updater.py [--experimental]")
+        print("  --experimental  check the main branch instead of the latest release")
+        raise SystemExit(0)
     experimental = "--experimental" in sys.argv
     try:
         result = update(experimental)
