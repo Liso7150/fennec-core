@@ -31,6 +31,6 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev
       - name: Unit tests + goldens
-        run: cargo test --release -p fennec-client -p fennec-outlets -p fennec-acp -p fennec-preflight -p fennec-pyjson
+        run: cargo test --release -p fennec-client -p fennec-outlets -p fennec-acp -p fennec-preflight -p fennec-pyjson -p fennec-workspace-tools
       - name: Build the client others path-depend on
         run: cargo build --release -p fennec-client

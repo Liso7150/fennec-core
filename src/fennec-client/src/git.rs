@@ -47,6 +47,8 @@ pub struct RepoContext {
     pub branch: String,
     pub changed: usize,
     pub is_repo: bool,
+    pub remote_url: Option<String>,
+    pub github_repo: Option<String>,
 }
 
 impl RepoContext {
@@ -75,7 +77,31 @@ pub fn repo_context(dir: &str) -> RepoContext {
     let changed = git_out(dir, &["status", "--porcelain", "--", "."])
         .map(|s| if s.trim().is_empty() { 0 } else { s.lines().count() })
         .unwrap_or(0);
-    RepoContext { branch, changed, is_repo: true }
+    let remote_url = git_out(dir, &["config", "--get", "remote.origin.url"]);
+    let github_repo = remote_url.as_deref().and_then(github_full_name);
+    RepoContext { branch, changed, is_repo: true, remote_url, github_repo }
+}
+
+fn github_full_name(remote: &str) -> Option<String> {
+    let value = remote.trim().trim_end_matches('/').trim_end_matches(".git");
+    let path = if let Some(path) = value.strip_prefix("git@github.com:") {
+        path
+    } else if let Some(path) = value.strip_prefix("https://github.com/") {
+        path
+    } else if let Some(path) = value.strip_prefix("http://github.com/") {
+        path
+    } else if let Some(path) = value.strip_prefix("ssh://git@github.com/") {
+        path
+    } else {
+        return None;
+    };
+    let mut parts = path.split('/');
+    let owner = parts.next()?.trim();
+    let name = parts.next()?.trim();
+    if owner.is_empty() || name.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{owner}/{name}"))
 }
 
 #[cfg(test)]
@@ -93,5 +119,12 @@ mod tests {
     fn which_finds_a_tool_that_is_on_path() {
         assert!(which("git").is_some() || which("cmd").is_some());
         assert!(which("definitely-not-a-real-binary-9f3a").is_none());
+    }
+
+    #[test]
+    fn github_remote_urls_map_to_full_names() {
+        assert_eq!(github_full_name("https://github.com/foxen/fennec.git"), Some("foxen/fennec".into()));
+        assert_eq!(github_full_name("git@github.com:foxen/fennec.git"), Some("foxen/fennec".into()));
+        assert_eq!(github_full_name("https://gitlab.com/foxen/fennec.git"), None);
     }
 }

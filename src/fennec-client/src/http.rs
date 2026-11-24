@@ -33,15 +33,25 @@ pub fn connect(base: &str, timeout: Duration) -> Result<TcpStream, String> {
 /// Write `{method} {route}` plus the given headers and an optional JSON body.
 /// Used directly by the SSE path, which keeps the socket open afterwards.
 pub fn write_request(s: &mut TcpStream, host: &str, method: &str, route: &str, headers: &[(&str, &str)], body: Option<&str>) -> Result<(), String> {
+    write_request_bytes(s, host, method, route, headers, "application/json", body.map(str::as_bytes))
+}
+
+/// The bytes form, for a body that is not text. A WAV clip has no UTF-8
+/// decoding, and the string version would quietly corrupt a frame.
+pub fn write_request_bytes(s: &mut TcpStream, host: &str, method: &str, route: &str, headers: &[(&str, &str)], content_type: &str, body: Option<&[u8]>) -> Result<(), String> {
     let mut req = format!("{method} {route} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
     for (k, v) in headers {
         req.push_str(&format!("{k}: {v}\r\n"));
     }
     match body {
-        Some(b) => req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{b}", b.len())),
+        Some(b) => req.push_str(&format!("Content-Type: {content_type}\r\nContent-Length: {}\r\n\r\n", b.len())),
         None => req.push_str("\r\n"),
     }
-    s.write_all(req.as_bytes()).map_err(|e| e.to_string())
+    s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    if let Some(b) = body {
+        s.write_all(b).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Returns `(status, body)`; body is everything after the header block.
@@ -100,6 +110,22 @@ pub fn get_json(base: &str, route: &str, headers: &[(&str, &str)]) -> Result<Val
     serde_json::from_str(&body).map_err(|e| format!("json: {e}"))
 }
 
+/// Like `get_json`, except a non-2xx answer that is JSON comes back as that
+/// JSON instead of collapsing to `http {status}`. The inspector's routes write
+/// their refusal as `{"ok":false,"error":"…"}` with a 4xx status, and the
+/// sentence — "this image is 61 MB", "path escapes the configured workspace" —
+/// is the whole point of showing it in a pane.
+pub fn get_json_reason(base: &str, route: &str, headers: &[(&str, &str)]) -> Result<Value, String> {
+    let (host, _) = split_base(base);
+    let mut s = connect(base, GET_TIMEOUT)?;
+    write_request(&mut s, &host, "GET", route, headers, None)?;
+    let (status, body) = read_response(&mut s)?;
+    if !(200..300).contains(&status) {
+        return serde_json::from_str(&body).map_err(|_| format!("http {status}"));
+    }
+    serde_json::from_str(&body).map_err(|e| format!("json: {e}"))
+}
+
 pub fn post_json(base: &str, route: &str, headers: &[(&str, &str)], body: &Value) -> Result<Value, String> {
     let (host, _) = split_base(base);
     let mut s = connect(base, POST_TIMEOUT)?;
@@ -113,6 +139,26 @@ pub fn post_json(base: &str, route: &str, headers: &[(&str, &str)], body: &Value
 
 pub fn bearer(key: &str) -> String {
     format!("Bearer {key}")
+}
+
+/// A raw-body POST whose answer is JSON. Audio clips are the caller: bytes with
+/// no UTF-8 decoding and a load time measured in tens of seconds, so the
+/// content type and the timeout come from the caller instead of the JSON
+/// defaults. A refusal carries the sidecar's own sentence when it sent one.
+pub fn post_bytes(base: &str, route: &str, headers: &[(&str, &str)], content_type: &str, body: &[u8], timeout: Duration) -> Result<Value, String> {
+    let (host, _) = split_base(base);
+    let mut s = connect(base, timeout)?;
+    write_request_bytes(&mut s, &host, "POST", route, headers, content_type, Some(body))?;
+    let (status, text) = read_response(&mut s)?;
+    if !(200..300).contains(&status) {
+        let reason = serde_json::from_str::<Value>(&text).ok()
+            .and_then(|v| v["error"].as_str().map(str::to_string));
+        return Err(match reason {
+            Some(r) => format!("http {status}: {r}"),
+            None => format!("http {status}: {text}"),
+        });
+    }
+    serde_json::from_str(&text).map_err(|e| format!("json: {e}"))
 }
 
 /// Read an SSE stream from `route`, calling `on_event` for each `data:` line.
@@ -226,6 +272,24 @@ mod tests {
     fn a_non_200_is_reported_with_its_status_and_body() {
         let base = serve("HTTP/1.1 403 Forbidden\r\ncontent-length: 2\r\n\r\nno".to_string(), Duration::from_millis(200));
         assert_eq!(get_json(&base, "/api/outlets", &[]).unwrap_err(), "http 403");
+    }
+
+    #[test]
+    fn a_json_refusal_keeps_its_reason_across_a_4xx() {
+        let body = r#"{"ok":false,"error":"This image is 61 MB; a pane loads up to 4 MB."}"#;
+        let base = serve(
+            format!("HTTP/1.1 413 Payload Too Large\r\ncontent-length: {}\r\n\r\n{body}", body.len()),
+            Duration::from_millis(200),
+        );
+        let v = get_json_reason(&base, "/api/work/file?path=big.png", &[]).unwrap();
+        assert_eq!(v["ok"], serde_json::Value::Bool(false));
+        assert!(v["error"].as_str().unwrap().contains("61 MB"));
+        // A refusal with no JSON behind it still says what its status said.
+        let plain = serve(
+            "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 4\r\n\r\nboom".to_string(),
+            Duration::from_millis(200),
+        );
+        assert_eq!(get_json_reason(&plain, "/api/work/file", &[]).unwrap_err(), "http 500");
     }
 
     #[test]

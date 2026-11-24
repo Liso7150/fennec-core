@@ -136,6 +136,24 @@ impl WorkspaceTools {
         }))
     }
 
+    /// One file's raw bytes — at most `limit` of them — plus its size on disk.
+    /// `read_file` decodes to text, which is what the loop's context needs and
+    /// what turns a PNG into replacement characters; a pane that paints pixels
+    /// needs the bytes whole. This stays out of `call` so no agent tool can
+    /// drop a megabyte of base64 into its own prompt.
+    pub fn read_bytes(&self, path: &str, limit: u64) -> Result<(Vec<u8>, u64), ToolError> {
+        let resolved = self.safe_path(path)?;
+        let metadata = fs::metadata(&resolved)?;
+        if !metadata.is_file() {
+            return Err(ToolError::InvalidPath);
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(&resolved)?
+            .take(limit)
+            .read_to_end(&mut bytes)?;
+        Ok((bytes, metadata.len()))
+    }
+
     pub fn grep(&self, pattern: &str, path: &str) -> Result<Value, ToolError> {
         let regex = Regex::new(pattern)?;
         let root = self.safe_path(path)?;
@@ -346,5 +364,22 @@ mod tests {
         let tools = WorkspaceTools::new(temp.path()).unwrap();
         assert_eq!(tools.read_file("main.rs", true).unwrap()["lines"], 2);
         assert_eq!(tools.grep("alpha", ".").unwrap()["count"], 2);
+    }
+
+    #[test]
+    fn reads_bytes_whole_capped_and_jailed() {
+        let temp = tempfile::tempdir().unwrap();
+        // A PNG header is the case that matters: no text decoder hands these
+        // bytes back unchanged, which is why the pane does not use `read_file`.
+        let png: [u8; 12] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 3];
+        fs::write(temp.path().join("shot.png"), png).unwrap();
+        fs::write(temp.path().join(".env"), "secret").unwrap();
+        let tools = WorkspaceTools::new(temp.path()).unwrap();
+        let (bytes, size) = tools.read_bytes("shot.png", 8).unwrap();
+        assert_eq!(bytes.as_slice(), &png[..8]);
+        assert_eq!(size, png.len() as u64, "the cap limits the read, not the reported size");
+        assert!(matches!(tools.read_bytes(".env", 8), Err(ToolError::RestrictedPath)));
+        assert!(matches!(tools.read_bytes("../shot.png", 8), Err(ToolError::OutsideWorkspace)));
+        assert!(matches!(tools.read_bytes(".", 8), Err(ToolError::InvalidPath)));
     }
 }

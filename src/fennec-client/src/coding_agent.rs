@@ -84,6 +84,37 @@ pub struct GithubAccountStatus {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct GithubRepository {
+    pub name: String,
+    pub full_name: String,
+    pub private: bool,
+    pub html_url: String,
+    pub default_branch: Option<String>,
+    pub owner_login: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct GithubRepositoryStatus {
+    pub authenticated: bool,
+    pub repositories: Vec<GithubRepository>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ObsidianStatus {
+    pub configured: bool,
+    pub vault: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ObsidianNoteResponse {
+    pub path: String,
+    pub created: bool,
+    pub bytes: usize,
+}
+
 impl BackendCapabilities {
     pub fn supports(&self, feature: &str) -> bool {
         self.features.iter().any(|candidate| candidate == feature)
@@ -109,6 +140,13 @@ impl CodingAgentClient {
 
     fn get(&self, route: &str) -> Result<Value, String> {
         http::get_json(&self.base, route, &[("X-Fennec-Client", "1")])
+    }
+
+    /// A GET whose 4xx answer is expected to be a JSON refusal. The inspector's
+    /// `work` routes put the reason for a refusal in the body, and the panes
+    /// quote it, so `self.get` would throw away the only useful part.
+    fn get_reason(&self, route: &str) -> Result<Value, String> {
+        http::get_json_reason(&self.base, route, &[("X-Fennec-Client", "1")])
     }
 
     fn post(&self, route: &str, body: &Value) -> Result<Value, String> {
@@ -212,6 +250,56 @@ impl CodingAgentClient {
             })
     }
 
+    /// Read the repositories visible to the local GitHub CLI account.
+    pub fn github_repositories(&self) -> GithubRepositoryStatus {
+        self.get("/api/github/repositories")
+            .ok()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_else(|| GithubRepositoryStatus {
+                authenticated: false,
+                repositories: Vec::new(),
+                error: Some("GitHub repositories unavailable".into()),
+            })
+    }
+
+    /// Create a remote repository through the backend's local GitHub CLI.
+    pub fn create_github_repository(&self, name: &str, private: bool) -> Result<GithubRepository, String> {
+        let value = self.post("/api/github/repositories", &json!({
+            "name": name,
+            "private": private,
+        }))?;
+        serde_json::from_value(value).map_err(|error| format!("json: {error}"))
+    }
+
+    /// Read the configured local Obsidian vault without touching credentials.
+    pub fn obsidian_status(&self) -> ObsidianStatus {
+        self.get("/api/obsidian/status")
+            .ok()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_else(|| ObsidianStatus {
+                configured: false,
+                vault: None,
+                message: "Obsidian status unavailable".into(),
+            })
+    }
+
+    /// Write a note through the backend's vault-jail validation.
+    pub fn obsidian_write_note(
+        &self,
+        title: &str,
+        content: &str,
+        folder: Option<&str>,
+        overwrite: bool,
+    ) -> Result<ObsidianNoteResponse, String> {
+        let value = self.post("/api/obsidian/notes", &json!({
+            "title": title,
+            "content": content,
+            "folder": folder,
+            "overwrite": overwrite,
+        }))?;
+        serde_json::from_value(value).map_err(|error| format!("json: {error}"))
+    }
+
     /// Delegate work to another agent.
     pub fn delegate(
         &self,
@@ -274,6 +362,46 @@ impl CodingAgentClient {
         let msg = self.send_message(&task.id, content)?;
         Ok((task, msg))
     }
+
+    /// One directory listing for the inspector's Files tab. Empty `workspace`
+    /// means the server's own root; see the backend's `work` module.
+    pub fn work_files(&self, path: &str, workspace: &str) -> Result<Value, String> {
+        self.get_reason(&format!(
+            "/api/work/files?path={}&workspace={}",
+            encode_query_value(path),
+            encode_query_value(workspace),
+        ))
+    }
+
+    /// One file preview for the Files tab — text, or an image as base64 under
+    /// `mime`/`data`. Capped by the server, which refuses what it will not send.
+    pub fn work_file(&self, path: &str, workspace: &str) -> Result<Value, String> {
+        self.get_reason(&format!(
+            "/api/work/file?path={}&workspace={}",
+            encode_query_value(path),
+            encode_query_value(workspace),
+        ))
+    }
+
+    /// Read one web page as text for the inspector's Browser tab.
+    pub fn browse(&self, url: &str) -> Result<Value, String> {
+        self.post("/api/browse", &json!({ "url": url }))
+    }
+}
+
+/// Percent-encode a query-component value. Path and workspace strings arrive
+/// from the pane and may hold spaces, backslashes, `&`, `#`, or non-ASCII.
+fn encode_query_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 impl Default for CodingAgentClient {
@@ -286,15 +414,21 @@ impl Default for CodingAgentClient {
 mod tests {
     use super::*;
 
+    // The process-wide environment can only be mutated under a lock; without
+    // it these two tests race each other's FENNEC_AGENT_URL.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn default_base_is_loopback_8787() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let c = CodingAgentClient::new();
         assert_eq!(c.base, "http://127.0.0.1:8787");
     }
 
     #[test]
     fn env_var_overrides_default() {
-        // SAFETY: test-only, no other threads read this env var concurrently.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: held under ENV_LOCK, no other thread reads this env var concurrently.
         unsafe { std::env::set_var("FENNEC_AGENT_URL", "http://127.0.0.1:9999") };
         let c = CodingAgentClient::new();
         assert_eq!(c.base, "http://127.0.0.1:9999");
@@ -328,5 +462,13 @@ mod tests {
         assert!(caps.supports("tasks"));
         assert!(caps.supports("events-sse"));
         assert!(!caps.supports("events-websocket"));
+    }
+
+    #[test]
+    fn query_values_escape_what_a_path_can_contain() {
+        assert_eq!(encode_query_value("a b/c"), "a%20b%2Fc");
+        assert_eq!(encode_query_value("a&b#c=d%e"), "a%26b%23c%3Dd%25e");
+        assert_eq!(encode_query_value("保留"), "%E4%BF%9D%E7%95%99");
+        assert_eq!(encode_query_value("ok-1.0~_"), "ok-1.0~_");
     }
 }

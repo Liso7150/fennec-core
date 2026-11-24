@@ -307,6 +307,16 @@ pub fn discover_in(environ: &Environ, home: &Path) -> Suite {
     out
 }
 
+/// The outlet gate report the Python core owns, as a child-process snippet.
+/// The launcher hands this to a python child; the Rust agent captures it, so
+/// both UI surfaces read one implementation without a Python server running.
+pub const OUTLETS_CHECK: &str = "import importlib, json\n\
+loaded = importlib.import_module('config').load_config()\n\
+value = importlib.import_module('outlets').Outlets(loaded).status()\n\
+text = json.dumps(value, indent=2, ensure_ascii=False)\n\
+try: print(text)\n\
+except UnicodeEncodeError: print(json.dumps(value, indent=2))\n";
+
 impl Suite {
     /// Paths offered in the workspace selector: checkouts that are real git
     /// repositories (the manifest lists concept repos; only some are cloned).
@@ -314,16 +324,15 @@ impl Suite {
         self.repos.iter().map(|r| r.path.clone()).filter(|p| p.join(".git").exists()).collect()
     }
 
-    /// Where the engine binary lives, per the manifest's `engine_root`. Looks
-    /// for a Fennec build first, then the legacy Colibri launcher layout.
+    /// Where the engine binary lives, per the manifest's `engine_root`. Fennec is
+    /// the only engine, so only its native build layouts are probed.
     pub fn engine_binary(&self) -> PathBuf {
         let mut roots: Vec<PathBuf> = Vec::new();
         if !self.engine_root.as_os_str().is_empty() {
             roots.push(self.engine_root.clone());
         }
         roots.push(home().join("Fennec"));
-        roots.push(home().join("Colibri"));
-        let names = if cfg!(windows) { ["fennec.exe", "coli.exe", "c.exe"] } else { ["fennec", "coli", "c"] };
+        let names: &[&str] = if cfg!(windows) { &["fennec.exe", "fennec"] } else { &["fennec"] };
         for root in roots {
             for rel in ["target/release", "target/debug", "."] {
                 for n in names {
@@ -354,6 +363,23 @@ impl Suite {
             }
         }
         None
+    }
+
+    /// The core's outlet gates as JSON, or None when no core checkout or
+    /// interpreter exists. Probes are the core's own; nothing is reimplemented.
+    pub fn outlets_status(&self) -> Option<Value> {
+        let core = self.core_dir()?;
+        let py = Self::python()?;
+        let out = std::process::Command::new(py)
+            .arg("-c")
+            .arg(OUTLETS_CHECK)
+            .current_dir(core)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        serde_json::from_slice(&out.stdout).ok()
     }
 
     /// Launch the canonical Rust agent service from its checkout, then an
@@ -417,6 +443,14 @@ impl Suite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outlets_status_is_none_without_a_core_checkout() {
+        let home = std::env::temp_dir().join("fennec-suite-no-core-checkout");
+        let suite = discover_in(&Environ::new(), &home);
+        assert!(suite.core_dir().is_none());
+        assert!(suite.outlets_status().is_none());
+    }
 
     fn environ(pairs: &[(&str, &str)]) -> Environ {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()

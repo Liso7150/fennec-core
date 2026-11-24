@@ -9,6 +9,7 @@ pub mod coding_agent;
 pub mod engine;
 pub mod git;
 pub mod http;
+pub mod speech;
 pub mod suite;
 
 pub use agent::{Core, Outlet, Outlets, outlet_rows, OUTLET_RUN_TIMEOUT};
@@ -16,4 +17,5 @@ pub use coding_agent::{
     AgentTask, BackendCapabilities, CodingAgentClient, MessageContent, SseEvent, TaskMessage,
 };
 pub use engine::{ChatDelta, Engine};
+pub use speech::{Speech, MAX_AUDIO_BYTES, SIDECAR};
 pub use suite::{Repo, Suite};
