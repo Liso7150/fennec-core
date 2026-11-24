@@ -291,7 +291,13 @@ class Outlets:
                         "engine words the values, and a mutation is never replayed."}
 
     def _decision_ready(self) -> bool:
-        """Whether anything can answer a decision: a hosted key, or a server on this box."""
+        """Whether anything can answer a decision: a hosted key, or a server on this box.
+
+        The loopback half is taken on faith - an endpoint naming this machine is what the
+        user configured, and probing it here would put a socket in every status call. A
+        dead loopback server therefore fails inside the driver, on the first decision,
+        before any mutation reaches the page.
+        """
         if liquid.is_local(liquid.endpoint_for(self.env)):
             return True
         return bool(self._liquid_key())
@@ -502,7 +508,9 @@ class Outlets:
                           f"point {WEB_PYTHON_ENV} at one that has it")
         if not self._decision_ready():
             self._cache.pop("fennec", None)
-            return None, "LIQUID_API_KEY is not set, so d1.2 cannot decide an action"
+            return None, ("no LIQUID_API_KEY, so the hosted d1.2 cannot decide an action; "
+                          "set the key, or point LIQUID_ENDPOINT at a loopback System One "
+                          "server already running an open-weight d1 model")
         command, cwd, env = self._fennec_command(python, url, goal, max_steps, timeout)
         stdout, stderr, outcome = self._run_driver(command, cwd, env,
                                                    max(5, float(timeout)) + LANE_GRACE_S,

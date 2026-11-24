@@ -187,6 +187,27 @@ class FilesystemTests(unittest.TestCase):
             if os.name != "nt":
                 self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
 
+    def test_model_readiness_says_what_the_engine_would_do_with_the_path(self):
+        # fennec serve converts nothing and validates nothing before it mmaps a folder, so a
+        # not-ready model must be named before the user types the command, not after it
+        # answers in fluent nonsense.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ready = make_model(root, "ready")
+            partial = make_model(root, "partial", weights=False)
+            models = wizard.scan_models(root)
+        self.assertTrue(wizard.model_readiness(ready, models).startswith("ready"),
+                        wizard.model_readiness(ready, models))
+        line = wizard.model_readiness(partial, models)
+        self.assertIn("fennec-convert", line)
+        self.assertIn("partial", line)
+
+    def test_model_readiness_never_calls_an_unscanned_path_valid(self):
+        # A model outside models_root has no classifier result, so the honest answer is that
+        # the path is unchecked rather than a readiness the wizard did not compute.
+        self.assertIn("unchecked", wizard.model_readiness("elsewhere/model", []))
+        self.assertEqual(wizard.model_readiness("", []), "none selected")
+
 
 class MainTests(unittest.TestCase):
     def setUp(self):
@@ -230,6 +251,12 @@ class MainTests(unittest.TestCase):
         self.assertIn("engine checkout", err.getvalue())
         self.assertFalse(self.config_file.exists())
 
+    def test_the_written_config_advice_states_model_readiness(self):
+        code, out, err = self.run_main("--yes")
+        self.assertEqual(code, 0, err)
+        self.assertIn("readiness ready", out)
+        self.assertIn("fennec serve --model", out)
+
     def test_dry_run_prints_without_writing(self):
         code, out, err = self.run_main("--dry-run", "--json")
         self.assertEqual(code, 0, err)
@@ -257,6 +284,31 @@ class MainTests(unittest.TestCase):
         info = wizard.device_info(self.root, environ={})
         for key in ("os", "arch", "cores", "ram_gb", "free_gb", "vulkan", "metal"):
             self.assertIn(key, info)
+
+    def test_the_summary_names_the_browser_decider_and_whether_it_can_run(self):
+        # Setup used to print every lane but the one that needs a credential, so a
+        # machine with no key reported green and the first web_task failed.
+        lines = wizard._summary(
+            {"engine_root": "e", "suite_root": "s", "models_root": "m", "cache_root": "c",
+             "backend": "vulkan", "ctx": 0, "policy": "ask", "model": ""},
+            {"ok": True}, {"missing": []},
+            {"os": "Linux", "arch": "x86_64", "cores": 8, "ram_gb": 32, "free_gb": 20},
+            {},
+        )
+        browser = [line for line in lines if line.startswith("browser")]
+        self.assertEqual(len(browser), 1, lines)
+        self.assertIn("not ready", browser[0])
+        self.assertIn("LIQUID_API_KEY", browser[0])
+        self.assertNotIn("openbot", "".join(lines))
+
+    def test_the_browser_lane_reads_the_same_env_as_the_decider(self):
+        self.assertIn("loopback, free", wizard.browser_lane(
+            {"LIQUID_ENDPOINT": "http://127.0.0.1:8199/v1/systemone"}))
+        self.assertIn("hosted, billed", wizard.browser_lane({"LIQUID_API_KEY": "k"}))
+        # A named endpoint that is not loopback still needs the key: the wizard must
+        # not talk itself into "free" because someone typed a URL.
+        self.assertIn("not ready", wizard.browser_lane(
+            {"LIQUID_ENDPOINT": "https://example.test/v1/systemone"}))
 
 
 if __name__ == "__main__":

@@ -520,7 +520,13 @@ class Engine:
                 return {"starting": True}
             script = self.config.engine_root / "scripts" / "npu_embed_server.py"
             if not script.is_file():
-                raise EngineError("Optional NPU sidecar is not installed")
+                # The Fennec engine has no NPU embedding sidecar of its own, so
+                # this is expected on a Fennec install rather than a broken one.
+                # Naming the probed path is what tells the two apart.
+                raise EngineError(
+                    f"NPU embedding sidecar is not installed: no scripts/npu_embed_server.py "
+                    f"under {self.config.engine_root}. Embeddings stay on the CPU path."
+                )
             python, options = spawn_options(self.config.python)
             self.npu_log_path.parent.mkdir(parents=True, exist_ok=True)
             env = self._engine_env()

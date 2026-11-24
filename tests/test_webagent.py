@@ -688,6 +688,33 @@ class Transport(unittest.TestCase):
             sys.modules.update(saved)
         self.assertIn("browser-harness", str(caught.exception))
 
+    def test_a_daemon_that_never_came_up_names_the_gate_not_its_log(self):
+        """The harness's fallback reports a file path; the caller needs the requirement."""
+        cdp = FakeCDP()
+
+        def stubborn():
+            raise RuntimeError("daemon default didn't come up -- check C:\tmp\bu-default.log")
+
+        with self.assertRaises(webagent.BrowserUnavailable) as caught:
+            webagent.Browser("https://shop.test/", cdp=cdp, ensure_daemon=stubborn)
+        message = str(caught.exception)
+        self.assertIn("BU_CDP_URL", message)
+        self.assertNotIn("bu-default.log", message, "a log path is not something a caller can act on")
+        self.assertEqual(cdp.calls, [], "no tab is opened against a browser that never answered")
+
+    def test_each_known_browser_gate_says_what_to_do(self):
+        cases = {
+            "chrome-not-running: no supported browser is running": "Open the browser",
+            "permission-blocked: the pending Chrome connection ended": "Allow remote debugging",
+            "remote-debugging-setup: opened chrome://inspect/#remote-debugging": "chrome://inspect",
+        }
+        for reason, expected in cases.items():
+            with self.subTest(reason=reason):
+                self.assertIn(expected, webagent.browser_gate(reason))
+
+    def test_a_reason_fennec_has_not_seen_is_still_the_reason_it_got(self):
+        self.assertEqual(webagent.browser_gate("daemon refused: port 9333 busy"),
+                         "daemon refused: port 9333 busy")
     def test_an_expression_that_throws_is_a_stale_page_not_a_crash(self):
         browser, _started = self.open(FakeCDP([("throwing", THREW)]))
         with self.assertRaises(webagent.StalePage):
@@ -998,6 +1025,20 @@ class WebDriverTests(unittest.TestCase):
         self.assertEqual(report, {"ok": False, "engine": "liquid-d1.2",
                                   "error": "OSError: Chrome refused to start"})
 
+    def test_a_browser_that_never_answered_is_reported_as_the_gate(self):
+        """The gate sentence is the instruction, so no exception name is allowed to bury it."""
+
+        def refuse(*args, **kwargs):
+            raise webagent.BrowserUnavailable(
+                webagent.browser_gate("daemon default didn't come up -- check /tmp/bu.log"))
+
+        out = io.StringIO()
+        with mock.patch.object(webagent, "WebTask", refuse), contextlib.redirect_stdout(out):
+            code = web_driver.main(self.ARGS)
+        self.assertEqual(code, 3)
+        report = self.report_from(out.getvalue())
+        self.assertIn("BU_CDP_URL", report["error"])
+        self.assertNotIn("BrowserUnavailable", report["error"])
     def test_the_wall_clock_stops_the_loop_without_losing_the_accounting(self):
         task = self.task(snapshots=50, report={"ok": False, "engine": "liquid-d1.2",
                                                "status": "running", "steps": 2,

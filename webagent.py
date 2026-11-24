@@ -105,7 +105,7 @@ MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})
 
 
 class BrowserUnavailable(RuntimeError):
-    """The CDP transport is not installed in this interpreter."""
+    """The browser half of the lane is missing: no transport, or no reachable browser."""
 
 
 class StalePage(ValueError):
@@ -133,6 +133,38 @@ def _transport():
     return cdp, ensure_daemon
 
 
+# The transport reports its own reasons with a prefix, and the known ones already carry an
+# instruction. The report it falls back to when the daemon log had not been written yet names a
+# log *path* instead, which is a file on this machine rather than something a caller can act on,
+# and the prefixes are phrased for whoever embeds the harness, not for a task transcript. So each
+# gate is said here in the second person. An unrecognised reason is kept verbatim: a failure
+# Fennec has not seen before is better reported than hidden behind a guess.
+BROWSER_GATES = (
+    ("chrome-not-running",
+     "Fennec cannot reach a browser: no Chrome or Edge window is running that it may attach to. "
+     "Open the browser this task should use, then retry."),
+    ("permission-blocked",
+     "Fennec cannot reach a browser: Chrome has not approved the debugging connection. Click "
+     "Allow on its 'Allow remote debugging?' popup, then retry."),
+    ("remote-debugging-setup",
+     "Fennec cannot reach a browser: remote debugging is not enabled for it. On the "
+     "chrome://inspect/#remote-debugging page that was opened, tick 'Allow remote debugging for "
+     "this browser instance', then retry."),
+    ("didn't come up",
+     "Fennec cannot reach a browser over CDP. Open Chrome or Edge and accept its 'Allow remote "
+     "debugging?' popup, or start one with --remote-debugging-port and point BU_CDP_URL at it."),
+)
+
+
+def browser_gate(detail):
+    """What the caller can do about a transport failure, in place of its log path."""
+    text = str(detail)
+    for marker, hint in BROWSER_GATES:
+        if marker in text.lower():
+            return hint
+    return text
+
+
 class Browser:
     """One attached CDP session for a whole task, not one process per action.
 
@@ -147,7 +179,10 @@ class Browser:
             raise ValueError(f"Fennec only browses http(s) urls, not {url!r}")
         resolved_cdp, resolved_daemon = (cdp, ensure_daemon) if cdp else _transport()
         if resolved_daemon is not None:
-            resolved_daemon()
+            try:
+                resolved_daemon()
+            except RuntimeError as exc:
+                raise BrowserUnavailable(browser_gate(exc)) from None
         self.cdp = resolved_cdp
         self.viewport = viewport or VIEWPORT
         self._sleep = sleep

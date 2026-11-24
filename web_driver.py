@@ -88,6 +88,11 @@ def main(argv=None) -> int:
         # authorised, or a page that will not load, has spent no decision by now.
         task = webagent.WebTask(args.url, args.goal, model=args.model, screenshots=bool(args.screenshots),
                                 progress=note, **limits)
+    except webagent.BrowserUnavailable as exc:
+        # The loop named the gate and the fix, so this is the one error that reads better
+        # without a type in front of it: the sentence is the instruction.
+        _emit({"ok": False, "engine": "liquid-d1.2", "error": str(exc)})
+        return 3
     except Exception as exc:
         _emit({"ok": False, "engine": "liquid-d1.2", "error": f"{type(exc).__name__}: {exc}"})
         return 3

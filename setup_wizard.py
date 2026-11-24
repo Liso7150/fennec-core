@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 from config import BACKENDS, POLICIES
 import convert
+import liquid
 
 # The keys a config file may carry. `web_python` says which interpreter runs the browser
 # loop; the core owns the default, this list only has to accept what the core (or the hub)
@@ -60,8 +61,7 @@ VULKAN_LINUX = (
     "/usr/lib64/libvulkan.so.1",
     "/usr/lib/libvulkan.so.1",
 )
-UPSTREAM = ("engine base idea JustVugg/colibri (https://github.com/JustVugg/colibri), "
-            "fine-tuning lyogavin/airllm (https://github.com/lyogavin/airllm)")
+UPSTREAM = "fine-tuning lyogavin/airllm (https://github.com/lyogavin/airllm)"
 
 
 def config_path(environ=None, home=None) -> Path:
@@ -246,7 +246,9 @@ def install_dependencies(python: str, *, venv: bool = False, packages=CORE_DEPS,
 
 def fennec_binary(directory):
     path = Path(str(directory or "")).expanduser()
-    exe = "fennec.exe" if sys.platform == "win32" else "fennec"
+    # os.name, not sys.platform: a Cygwin/MSYS interpreter reports "cygwin"/"msys" while
+    # still running Windows binaries named .exe.
+    exe = "fennec.exe" if os.name == "nt" else "fennec"
     for rel in FENNEC_DIRS:
         cli = path.joinpath(*rel, exe)
         if cli.is_file():
@@ -553,7 +555,48 @@ def prompt_values(values: dict, models: list[dict], device: dict, input_fn, out=
     return updated
 
 
-def _summary(config: dict, python: dict, dependencies: dict, device: dict) -> list[str]:
+def browser_lane(environ=None) -> str:
+    """What the browser decider will do, read the way the core reads it.
+
+    The wizard used to report every lane but this one, so a machine with no
+    credential finished setup looking green and the first `web_task` failed.
+    """
+    env = os.environ if environ is None else environ
+    url = liquid.endpoint_for(env)
+    if liquid.is_local(url):
+        return f"{liquid.model_name(env, url)} @ {url} · loopback, free, no key"
+    if env.get("LIQUID_API_KEY", "").strip():
+        return f"{liquid.model_name(env, url)} @ {url} · hosted, billed by token"
+    return (f"{liquid.DEFAULT_MODEL} not ready · set LIQUID_API_KEY, or {liquid.ENDPOINT_ENV}"
+            f" to a loopback {liquid.LOCAL_MODEL} server")
+
+
+def model_readiness(model, models) -> str:
+    """What `fennec serve --model` would do with this path, said before it is tried.
+
+    The engine mmaps config.json + *.safetensors and converts nothing, so a packed int4 or
+    a gguf folder answers in fluent nonsense instead of erroring. scan_models already
+    resolved every folder under models_root, so the wizard can name the state it found; a
+    path outside that scan is reported as unchecked rather than guessed at.
+    """
+    wanted = str(model or "").strip()
+    if not wanted:
+        return "none selected"
+
+    def same(left, right):
+        return os.path.normcase(str(Path(left).expanduser())) == os.path.normcase(str(Path(right).expanduser()))
+
+    entry = next((m for m in models if same(m["path"], wanted)), None)
+    if entry is None:
+        return "unchecked: not a folder under models_root, and the engine reads a path as-is"
+    if entry["ready"]:
+        return f"ready ({entry['kind']})"
+    return (f"{entry['state']} ({entry['kind']}) - run fennec-convert {entry['path']} "
+            "before serving it directly")
+
+
+def _summary(config: dict, python: dict, dependencies: dict, device: dict,
+             environ=None) -> list[str]:
     lines = [
         f"engine    {config['engine_root']}",
         f"suite     {config['suite_root']}",
@@ -563,7 +606,10 @@ def _summary(config: dict, python: dict, dependencies: dict, device: dict) -> li
         + (f" ({python.get('version')})" if python.get("version") else ""),
         f"model     {config.get('model') or '(none yet)'}",
         f"backend   {config['backend']} · ctx {config['ctx'] if config['ctx'] else 'automatic'} · {config['policy']}",
+        f"browser   {browser_lane(environ)}",
     ]
+    if config.get("openbot_url"):
+        lines.append(f"openbot   {config['openbot_url']}")
     if dependencies.get("missing"):
         lines.append("deps      missing: " + ", ".join(dependencies["missing"]))
     else:
@@ -662,14 +708,14 @@ def main(argv=None, *, config=None, home=None, environ=None, input_fn=None,
         if args.json:
             out(json.dumps(config_values, indent=2))
         else:
-            for line in _summary(config_values, python, dependencies, device):
+            for line in _summary(config_values, python, dependencies, device, env):
                 out(line)
             out(f"config    {destination} (not written: --dry-run)")
         return 0
 
     if not args.yes:
         out("")
-        for line in _summary(config_values, python, dependencies, device):
+        for line in _summary(config_values, python, dependencies, device, env):
             out(line)
         answer = (input_fn or input)(f"Write {destination}? [Y/n]: ").strip().lower()
         if answer.startswith("n"):
@@ -688,10 +734,11 @@ def main(argv=None, *, config=None, home=None, environ=None, input_fn=None,
         out(f"Wrote {result['path']}")
         if result["backup"]:
             out(f"Backed up the previous file to {result['backup']}")
-        for line in _summary(config_values, python, dependencies, device):
+        for line in _summary(config_values, python, dependencies, device, env):
             out(line)
+        out(f"readiness {model_readiness(config_values.get('model'), models)}")
         out("Next: `fennec diagnose`, then `fennec serve --model <dir> --auto-tier`.")
-        out(f"Upstream: {UPSTREAM} - neither is pulled by this command.")
+        out(f"Upstream: {UPSTREAM} - it is never pulled by this command.")
     return 0
 
 
