@@ -675,7 +675,8 @@ class Agent:
                                allow_web=not readonly, require_approval=not readonly,
                                allow_npu=self.allow_npu, engine_client=self._client(),
                                outlets=session.outlets, extra=tools,
-                               system_extra=session.system_extra)
+                               system_extra=session.system_extra,
+                               reasoning_effort=getattr(self.settings(), "reasoning_effort", "auto"))
         session.current = None
         session.message_id = session.thought_id = None
         with self._lock:

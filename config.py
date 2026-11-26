@@ -47,6 +47,7 @@ class Config:
     backend: str = "auto"
     ctx: int = 0
     policy: str = "quality"
+    reasoning_effort: str = "auto"
     web_python: str = ""
     openbot_url: str = "http://127.0.0.1:3001"
     api_key: str = field(default="", repr=False)
@@ -76,6 +77,7 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
         "cache_root": str(home / ".cache" / "fennec"),
         "model": "", "engine_url": "http://127.0.0.1:8184",
         "backend": "auto", "ctx": 0, "policy": "quality",
+        "reasoning_effort": "auto",
         "web_python": "",
         "openbot_url": "http://127.0.0.1:3001",
     }
@@ -86,6 +88,7 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
         "FENNEC_CACHE": "cache_root", "FENNEC_PYTHON": "python",
         "FENNEC_MODEL": "model", "FENNEC_ENGINE_URL": "engine_url",
         "FENNEC_WORKSPACE": "workspace", "FENNEC_WEB_PYTHON": "web_python",
+        "FENNEC_REASONING_EFFORT": "reasoning_effort",
         "FENNEC_OPENBOT_URL": "openbot_url",
     }.items():
         if variable in env:
@@ -110,6 +113,8 @@ def load_config(path: str | Path | None = None, *, environ=None, home: Path | No
         raise ConfigError(f"backend must be one of {', '.join(BACKENDS)}")
     if values["policy"] not in POLICIES:
         raise ConfigError(f"policy must be one of {', '.join(POLICIES)}")
+    if values["reasoning_effort"] not in {"auto", "low", "medium", "high"}:
+        raise ConfigError("reasoning_effort must be auto, low, medium, or high")
     values["web_python"] = values["web_python"].strip()
     if type(values["ctx"]) is not int or not 0 <= values["ctx"] <= 1_048_576:
         raise ConfigError("ctx must be an integer from 0 (automatic) to 1048576")

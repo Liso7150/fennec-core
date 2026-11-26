@@ -12,8 +12,18 @@ same commit. `v0.2.0` was never released here (the ladder goes `0.1.0` →
 `v0.3.0`), and `v0.7.0` carries only version-string edits over `v0.6.0`. Dates are
 the GitHub release publish dates.
 
-## [1.0.0] - 2026-11-24
-Version 1.0.0 is the current release.
+## [1.0.0] - 2026-11-26
+
+This release replaces the 2026-11-24 build and supplies the reasoning-effort plumbing required by
+the matching JetBrains plugin. Measured on the working tree: **563 Python tests passed, 1 skipped**.
+
+### Added
+- Shared `reasoning_effort` configuration (`auto`, `low`, `medium`, `high`) with
+  `FENNEC_REASONING_EFFORT` override; ACP turns pass it into `loop.new_session`, and the setup
+  wizard preserves it
+
+## [1.0.0] - 2026-11-24 (superseded)
+This build was replaced by the 2026-11-26 release.
 Measured on the working tree: **560 Python tests passed**
 (1 skipped) and **69 Rust tests passed / 0 failed across 16 suites** in
 `fennec-core/src` — core is two lanes in the results hub. Counts come from

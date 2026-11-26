@@ -59,6 +59,15 @@ class BuildConfigTests(unittest.TestCase):
         self.assertEqual(config["backend"], "vulkan")
         self.assertEqual(config["ctx"], 8192)
 
+    def test_reasoning_effort_survives_the_wizard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = wizard.build_config({"root": directory, "reasoning_effort": "medium"},
+                                         home=directory)
+            self.assertEqual(config["reasoning_effort"], "medium")
+            with self.assertRaisesRegex(ValueError, "reasoning_effort"):
+                wizard.build_config({"root": directory, "reasoning_effort": "sideways"},
+                                    home=directory)
+
     def test_relative_model_resolves_under_the_models_root(self):
         with tempfile.TemporaryDirectory() as directory:
             config = wizard.build_config({"root": directory, "model": "qwen36-35b"}, home=directory)

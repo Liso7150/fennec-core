@@ -202,12 +202,13 @@ fennec setup --yes --install-deps             # install missing core dependencie
 
 `--engine-root` must resolve to a checkout containing a built Fennec binary. `backend` accepts
 `auto`, `cuda`, `vulkan`, `metal`, `ort`, or `cpu`; `policy` accepts `quality`, `balanced`, or
-`experimental-fast`.
+`experimental-fast`. `reasoning_effort` accepts `auto`, `low`, `medium`, or `high` and defaults to
+`auto`; `FENNEC_REASONING_EFFORT` overrides the file.
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v     # 561 collected: 560 passed, 1 skipped
+python -m unittest discover -s tests -v     # 564 collected: 563 passed, 1 skipped
 cd src && cargo test --release --offline    # 69 tests across 16 suites
 ```
 

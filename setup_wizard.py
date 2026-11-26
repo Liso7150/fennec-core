@@ -34,7 +34,7 @@ import liquid
 # writes. A key an older setup left behind is not here, so the next write drops it.
 CONFIG_KEYS = {
     "engine_root", "suite_root", "models_root", "cache_root", "python", "model",
-    "engine_url", "web_root", "workspace", "backend", "ctx", "policy",
+    "engine_url", "web_root", "workspace", "backend", "ctx", "policy", "reasoning_effort",
     "web_python", "openbot_url",
 }
 # An empty string is a real answer for these, and only for these: "no model yet",
@@ -44,7 +44,7 @@ EMPTY_OK = {"model", "web_python"}
 SECRET_KEYS = {"api_key", "app_token", "token", "fennec_api_key", "fennec_app_token", "coli_api_key"}
 INPUT_KEYS = {
     "root", "engine_root", "suite_root", "models_root", "cache_root", "python",
-    "model", "engine_url", "backend", "ctx", "policy", "openbot_url", "web_python",
+    "model", "engine_url", "backend", "ctx", "policy", "reasoning_effort", "openbot_url", "web_python",
 }
 # The same three places the desktop's runtimePaths probes for the native engine.
 FENNEC_DIRS = (("target", "release"), ("target", "debug"), ())
@@ -464,6 +464,8 @@ def validate_config(data) -> dict:
         raise ValueError(f"backend must be one of {', '.join(BACKENDS)}")
     if data.get("policy", "quality") not in POLICIES:
         raise ValueError("policy must be quality, balanced or experimental-fast")
+    if data.get("reasoning_effort", "auto") not in {"auto", "low", "medium", "high"}:
+        raise ValueError("reasoning_effort must be auto, low, medium, or high")
     try:
         url = urlsplit(data.get("engine_url", "http://127.0.0.1:8184"))
         valid = (url.scheme in {"http", "https"} and url.hostname and url.port != 0
@@ -507,6 +509,8 @@ def build_config(values, *, home=None, system=None) -> dict:
         "policy": input_values.get("policy") or "quality",
         "model": str(Path(model).absolute()) if model else "",
     }
+    if str(input_values.get("reasoning_effort") or "").strip():
+        config["reasoning_effort"] = str(input_values["reasoning_effort"]).strip()
     if input_values.get("python"):
         config["python"] = _abs(input_values["python"], home_path)
     if str(input_values.get("web_python") or "").strip():

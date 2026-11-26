@@ -1195,6 +1195,17 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaises(ConfigError, msg=bad):
                     load_config(path, environ={}, home=Path(tmp))
 
+    def test_reasoning_effort_loads_from_json_and_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"reasoning_effort": "high"}), encoding="utf-8")
+            self.assertEqual(load_config(path, environ={}, home=Path(tmp)).reasoning_effort, "high")
+            self.assertEqual(load_config(path, environ={"FENNEC_REASONING_EFFORT": "low"},
+                                         home=Path(tmp)).reasoning_effort, "low")
+            path.write_text(json.dumps({"reasoning_effort": "sideways"}), encoding="utf-8")
+            with self.assertRaises(ConfigError):
+                load_config(path, environ={}, home=Path(tmp))
+
     def test_every_wizard_backend_loads(self):
         """Whatever the wizard offers has to load, so the two sets cannot drift."""
         import setup_wizard as wizard

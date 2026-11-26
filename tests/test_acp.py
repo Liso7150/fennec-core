@@ -528,6 +528,15 @@ class SessionTests(AcpCase):
 
 
 class TurnTests(AcpCase):
+    def test_reasoning_effort_from_shared_config_reaches_the_turn(self):
+        config = self.root / "fennec-config.json"
+        config.write_text(json.dumps({"reasoning_effort": "high"}), encoding="utf-8")
+        engine = ScriptEngine({"text": "done"})
+        client = self.client(engine, environ={"FENNEC_CONFIG": str(config)})
+        client.start_session(str(self.root))
+        self.assertEqual(client.prompt("think carefully")["result"], {"stopReason": "end_turn"})
+        self.assertIn("Reasoning effort: high", engine.calls[0]["messages"][0]["content"])
+
     def test_a_tool_turn_streams_every_update(self):
         engine = ScriptEngine(
             {"reasoning": "let me look", "tool_calls": [("read_file", {"path": "src/app.py"})]},
